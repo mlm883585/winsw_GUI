@@ -1,0 +1,37 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>your-nodejs-service</id>
+    <name>Your Node.js Service</name>
+    <description>Description of your Node.js service</description>
+
+    <!-- Node.js 可执行文件路径 -->
+    <executable>C:\Program Files\nodejs\node.exe</executable>
+
+    <!-- 入口脚本 -->
+    <arguments>C:\path\to\your\app.js</arguments>
+
+    <!-- 工作目录 -->
+    <workingdirectory>C:\path\to\your\app</workingdirectory>
+
+    <!-- 环境变量配置 -->
+    <env name="NODE_ENV" value="production"/>
+    <env name="PORT" value="3000"/>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <stoptimeout>15 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\your-nodejs-service</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>

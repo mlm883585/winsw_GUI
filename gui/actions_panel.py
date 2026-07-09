@@ -14,6 +14,8 @@ class ActionsPanel(ttk.Frame):
         # 内部按钮横向排列，并允许拉伸
         ttk.Button(config_frame, text="新建", command=callbacks['new']).pack(side="left", expand=True, fill="x", padx=5,
                                                                              pady=2)
+        ttk.Button(config_frame, text="从模板新建", command=callbacks['template']).pack(side="left", expand=True,
+                                                                                        fill="x", padx=5, pady=2)
         ttk.Button(config_frame, text="保存", command=callbacks['save']).pack(side="left", expand=True, fill="x",
                                                                               padx=5, pady=2)
         ttk.Button(config_frame, text="导入...", command=callbacks['import']).pack(side="left", expand=True, fill="x",

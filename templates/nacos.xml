@@ -1,0 +1,37 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>nacos</id>
+    <name>Nacos Server</name>
+    <description>Nacos service discovery and configuration server (standalone)</description>
+
+    <!-- 用 cmd 调用 Nacos 的 startup 脚本 -->
+    <executable>cmd.exe</executable>
+
+    <!-- 单机模式启动；集群模式去掉 -m standalone -->
+    <arguments>/c C:\nacos\bin\startup.cmd -m standalone</arguments>
+
+    <!-- 工作目录 -->
+    <workingdirectory>C:\nacos\bin</workingdirectory>
+
+    <!-- 环境变量配置 -->
+    <env name="JAVA_HOME" value="C:\Program Files\Java\jdk"/>
+    <env name="MODE" value="standalone"/>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <stoptimeout>30 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\nacos</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>

@@ -12,7 +12,8 @@ class ServiceListView(ttk.Frame):
         self.service_dir = "services"
 
         # --- UI Elements ---
-        self.listbox = tk.Listbox(self, exportselection=False)
+        # selectmode=EXTENDED 支持 Ctrl/Shift 多选，用于批量操作
+        self.listbox = tk.Listbox(self, exportselection=False, selectmode=tk.EXTENDED)
         self.listbox.pack(expand=True, fill="both", padx=5, pady=5)
         self.listbox.bind("<<ListboxSelect>>", self.on_select)
 
@@ -30,21 +31,28 @@ class ServiceListView(ttk.Frame):
             pass
 
     def on_select(self, event):
-        """当用户在列表中选择一项时调用"""
+        """当用户在列表中选择项目时调用。
+
+        仅在恰好选中 1 项时把配置载入右侧编辑区；多选时不改动编辑区，
+        避免反复重载，此时控制按钮会进入批量模式。
+        """
         selection_indices = self.listbox.curselection()
-        if not selection_indices:
+        if len(selection_indices) != 1:
             return
 
-        selected_index = selection_indices[0]
-        filename = self.listbox.get(selected_index)
+        filename = self.listbox.get(selection_indices[0])
 
         # 调用主窗口传递的回调函数
         if self.select_callback:
             self.select_callback(filename)
 
     def get_selected_filename(self):
-        """获取当前选中的文件名"""
+        """获取当前选中的第一个文件名（单服务操作用）"""
         selection_indices = self.listbox.curselection()
         if not selection_indices:
             return None
         return self.listbox.get(selection_indices[0])
+
+    def get_selected_filenames(self):
+        """获取当前选中的所有文件名（批量操作用）"""
+        return [self.listbox.get(i) for i in self.listbox.curselection()]

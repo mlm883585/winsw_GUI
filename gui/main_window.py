@@ -7,6 +7,7 @@ from tkinter import ttk, messagebox, filedialog
 
 # 模块导入
 from core.config_manager import ConfigManager
+from core.template_manager import TemplateManager
 from core.winsw_manager import WinSWManager
 from gui.actions_panel import ActionsPanel
 from gui.output_console import OutputConsole
@@ -32,6 +33,7 @@ class MainWindow(ttk.Frame):
 
         self.console = OutputConsole(self)
         self.config_manager = ConfigManager()
+        self.template_manager = TemplateManager()
         self.winsw_manager = WinSWManager(self.console.log, self.settings_manager)
 
         self.current_config = self.config_manager.get_default_config()
@@ -121,7 +123,8 @@ class MainWindow(ttk.Frame):
         self.right_paned_window.add(right_top_frame, weight=4)
 
         callbacks = {
-            'new': self.new_service, 'save': self.save_service, 'import': self.import_service_xml,
+            'new': self.new_service, 'template': self.new_from_template, 'save': self.save_service,
+            'import': self.import_service_xml,
             'delete': self.delete_service_config, 'install': self.install_service,
             'uninstall': self.uninstall_service, 'start': self.start_service, 'stop': self.stop_service,
             'restart': self.restart_service, 'status': self.status_service, 'refresh': self.refresh_service
@@ -212,6 +215,51 @@ class MainWindow(ttk.Frame):
         self.service_list.listbox.selection_clear(0, 'end')
         print("UI已重置为新配置。")
 
+    def new_from_template(self):
+        """从模板新建服务：弹出模态选择框，选定后将模板载入为未保存的新配置。"""
+        templates = self.template_manager.list_templates()
+        if not templates:
+            messagebox.showinfo("无可用模板", "templates 目录下没有可用的模板文件。")
+            return
+
+        dialog = tk.Toplevel(self.parent)
+        dialog.title("从模板新建服务")
+        dialog.transient(self.parent)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="请选择一个服务模板：").pack(padx=10, pady=(10, 5), anchor="w")
+        listbox = tk.Listbox(dialog, height=min(len(templates), 12), exportselection=False)
+        for name, _ in templates:
+            listbox.insert(tk.END, name)
+        listbox.pack(fill="both", expand=True, padx=10, pady=5)
+        listbox.selection_set(0)
+
+        def on_ok():
+            selection = listbox.curselection()
+            if not selection:
+                return
+            _, path = templates[selection[0]]
+            dialog.destroy()
+            self._apply_template(path)
+
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill="x", padx=10, pady=(5, 10))
+        ttk.Button(button_frame, text="确定", command=on_ok).pack(side="right", padx=(5, 0))
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(side="right")
+        listbox.bind("<Double-Button-1>", lambda e: on_ok())
+        dialog.wait_window()
+
+    def _apply_template(self, path: str):
+        """将模板配置载入 UI，作为一个未保存的新服务（蓝本参照 new_service）。"""
+        print(f"正在从模板新建服务: {path}")
+        self.log_viewer_tab.stop_monitoring()
+        self.current_filepath = None
+        self.current_config = self.template_manager.load_template(path)
+        self._set_current_config_to_ui(self.current_config)
+        self.xml_editor_tab.load_from_ui()
+        self.service_list.listbox.selection_clear(0, 'end')
+        print("模板已载入为新配置，请修改服务 ID 后点击“保存”。")
+
     def autofill_from_executable(self, exe_path: str):
         if not self.basic_info_tab.id_var.get() and not self.basic_info_tab.name_var.get():
             try:
@@ -300,23 +348,56 @@ class MainWindow(ttk.Frame):
         if messagebox.askyesno("确认操作", f"你确定要对服务 '{service_id}' 执行此操作吗？"):
             command_func(self._get_current_config_from_ui())
 
+    def _execute_batch_command(self, command_func, action_name: str):
+        """对列表中选中的多个服务批量执行命令。
+
+        基于磁盘上已保存的 XML 配置逐个执行，不触发 save_service
+        （即不包含当前右侧编辑区里尚未保存的改动）。
+        """
+        filenames = self.service_list.get_selected_filenames()
+        if not filenames:
+            messagebox.showwarning("操作无效", "请先从列表中选择服务。")
+            return
+
+        count = len(filenames)
+        if not messagebox.askyesno(
+                "确认批量操作",
+                f"确定对选中的 {count} 个服务执行【{action_name}】操作吗？\n"
+                f"（基于已保存的磁盘配置，不含当前未保存的编辑）"):
+            return
+
+        print(f"===== 开始批量【{action_name}】，共 {count} 个服务 =====")
+        for i, filename in enumerate(filenames, 1):
+            filepath = os.path.join("services", filename)
+            print(f"[{i}/{count}] 对 '{filename}' 执行【{action_name}】...")
+            config = self.config_manager.load_from_xml(filepath)
+            command_func(config)
+        print(f"===== 批量【{action_name}】完成 =====")
+
+    def _dispatch_command(self, command_func, action_name: str):
+        """根据列表选中数量自动分发：多选走批量，单选/无选走单服务。"""
+        if len(self.service_list.get_selected_filenames()) >= 2:
+            self._execute_batch_command(command_func, action_name)
+        else:
+            self._execute_service_command(command_func)
+
     def install_service(self):
-        self._execute_service_command(self.winsw_manager.install)
+        self._dispatch_command(self.winsw_manager.install, "安装")
 
     def uninstall_service(self):
-        self._execute_service_command(self.winsw_manager.uninstall)
+        self._dispatch_command(self.winsw_manager.uninstall, "卸载")
 
     def start_service(self):
-        self._execute_service_command(self.winsw_manager.start)
+        self._dispatch_command(self.winsw_manager.start, "启动")
 
     def stop_service(self):
-        self._execute_service_command(self.winsw_manager.stop)
+        self._dispatch_command(self.winsw_manager.stop, "停止")
 
     def restart_service(self):
-        self._execute_service_command(self.winsw_manager.restart)
+        self._dispatch_command(self.winsw_manager.restart, "重启")
 
     def status_service(self):
-        self._execute_service_command(self.winsw_manager.status)
+        self._dispatch_command(self.winsw_manager.status, "状态")
 
     def refresh_service(self):
-        self._execute_service_command(self.winsw_manager.refresh)
+        self._dispatch_command(self.winsw_manager.refresh, "刷新")

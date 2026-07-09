@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>redis</id>
+    <name>Redis Server</name>
+    <description>Redis in-memory data store</description>
+
+    <!-- redis-server 可执行文件路径 -->
+    <executable>C:\Redis\redis-server.exe</executable>
+
+    <!-- 指定配置文件 -->
+    <arguments>C:\Redis\redis.windows.conf</arguments>
+
+    <!-- 工作目录 -->
+    <workingdirectory>C:\Redis</workingdirectory>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <stoptimeout>15 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\redis</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>

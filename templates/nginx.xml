@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>nginx</id>
+    <name>Nginx Server</name>
+    <description>Nginx HTTP and reverse proxy server</description>
+
+    <!-- nginx 可执行文件路径 -->
+    <executable>C:\nginx\nginx.exe</executable>
+
+    <!-- 指定前缀路径，确保相对路径正确解析 -->
+    <arguments>-p C:\nginx</arguments>
+
+    <!-- 工作目录（必须为 nginx 安装根目录） -->
+    <workingdirectory>C:\nginx</workingdirectory>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <stoptimeout>15 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\nginx</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>

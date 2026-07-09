@@ -1,0 +1,36 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>your-java-service</id>
+    <name>Your Java Service</name>
+    <description>Description of your Java service</description>
+
+    <!-- Java 可执行文件路径 -->
+    <executable>C:\Program Files\Java\jdk\bin\java.exe</executable>
+
+    <!-- 启动参数：JVM 参数 + -jar 应用包 -->
+    <arguments>-Xms256m -Xmx512m -jar C:\path\to\your\app.jar</arguments>
+
+    <!-- 工作目录 -->
+    <workingdirectory>C:\path\to\your\app</workingdirectory>
+
+    <!-- 环境变量配置 -->
+    <env name="JAVA_HOME" value="C:\Program Files\Java\jdk"/>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <stoptimeout>15 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\your-java-service</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>

@@ -1,0 +1,34 @@
+<?xml version="1.0" ?>
+
+<service>
+    <id>mysql</id>
+    <name>MySQL Server</name>
+    <description>MySQL database server</description>
+
+    <!-- mysqld 可执行文件路径 -->
+    <executable>C:\Program Files\MySQL\MySQL Server\bin\mysqld.exe</executable>
+
+    <!-- 指定配置文件；加 console 参数让日志输出到标准输出便于采集 -->
+    <arguments>--defaults-file=C:\Program Files\MySQL\MySQL Server\my.ini --console</arguments>
+
+    <!-- 工作目录 -->
+    <workingdirectory>C:\Program Files\MySQL\MySQL Server\bin</workingdirectory>
+
+    <!-- 服务配置 -->
+    <resetfailure>1 day</resetfailure>
+    <priority>Normal</priority>
+    <!-- 数据库需要更长的优雅停止时间 -->
+    <stoptimeout>60 sec</stoptimeout>
+
+    <!-- 日志配置 -->
+    <logpath>C:\logs\mysql</logpath>
+    <log mode="roll"/>
+
+    <!-- 失败时重启 -->
+    <onfailure action="restart"/>
+
+    <!-- 服务账户配置 -->
+    <serviceaccount>
+        <username>LocalSystem</username>
+    </serviceaccount>
+</service>
