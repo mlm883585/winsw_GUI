@@ -1,46 +1,42 @@
-# 演进路线图
+# 演进路线图（索引）
 
-> 从现有 `winsw_GUI` 到分布式服务编排平台的分阶段落地计划。架构设计见 [architecture.md](./architecture.md)。
+> 从现有 `winsw_GUI` 到分布式服务编排平台的分阶段落地计划。
+> 总体架构见 [architecture.md](./architecture.md)；各阶段**详细设计文档**见下表链接。
 > 每阶段都可独立交付、独立验证。前 2 阶段几乎纯复用现有代码，风险低。
 
-## Phase 0 — 现状（已完成）
-本机单服务 WinSW 图形管理。基线不动。
+## 阶段总览
 
-## Phase 1 — 本机多服务 + 服务模板（复用为主，低风险）
-- `gui/service_list_view.py`：单选 → 多选；`gui/actions_panel.py`：支持批量启停。
-- 接入 `templates/`：从模板一键创建服务（当前模板未被代码引用）。新增 java/nodejs/nacos/mysql/redis/nginx 模板文件。
-- **验收判据**：单机可"选多个服务一键启停 + 从模板建服务"。
+| 阶段 | 主题 | 状态 | 核心交付 | 详细设计 |
+|------|------|------|----------|----------|
+| Phase 0 | 现状基线 | ✅ 已完成 | 本机单服务 WinSW 图形管理 | — |
+| Phase 1 | 本机多选批量 + 服务模板 | ✅ 已完成 | 多选批量操作、从模板一键建服务、6 个内置模板 | [phase-1](./phases/phase-1-multiselect-templates.md) |
+| Phase 2 | Agent 化 | 📝 设计 | 独立 Agent 进程 + REST API + Token；AgentBackend 抽象 | [phase-2](./phases/phase-2-agent.md) |
+| Phase 3 | Control Plane Web 骨架 | 📝 设计 | 多机纳管、聚合查看、远程单服务操作、远程建服务（透传）、SQLite | [phase-3](./phases/phase-3-control-plane.md) |
+| Phase 4 | 依赖编排引擎 | 📝 设计 | DAG 拓扑 + 就绪门控 + 探针 + 编排组 + 拓扑图一键启动（**核心价值**） | [phase-4](./phases/phase-4-orchestration.md) |
+| Phase 5 | Linux 适配 + 生产化 | 📝 设计 | systemd 后端、告警、审计、RBAC、mTLS、体验完善 | [phase-5](./phases/phase-5-linux-hardening.md) |
 
-## Phase 2 — Agent 化（架构关键第一步）
-- 把 `core/winsw_manager.py` + `core/config_manager.py` 抽成**独立 Agent 进程**，套一层 FastAPI，暴露 install/start/stop/status/logs/health API + token 认证。
-- 定义 `AgentBackend` 抽象接口，Windows 实现落地。
-- Agent 自身可被 WinSW 注册为开机自启服务。
-- **验收判据**：本机 Agent 通过 HTTP 完成全部现有操作（自己管自己），协议跑通。
+## 依赖关系
 
-## Phase 3 — Control Plane Web 骨架
-- FastAPI 后端 + 前端：机器清单（增删机器、填 Agent 地址+token）、聚合多机服务列表、集中查看状态/日志、远程单服务启停。
-- 心跳/状态上报打通；SQLite 落地机器/服务表。
-- **验收判据**：一个网页集中看/操作多台机器上的服务（尚无依赖编排）。
+```
+Phase 1（本机能力，已落地）
+   │
+Phase 2（Agent 化：能力下沉为可远程调用的 API）
+   │
+Phase 3（Control Plane：多机纳管的载体）
+   │
+Phase 4（依赖编排：平台的最终目标，建立在多机 + Agent 动作之上）
+   │
+Phase 5（跨平台 + 生产化：在核心稳定后加固）
+```
 
-## Phase 4 — 依赖编排引擎（核心价值）
-- 服务定义加 `depends_on[]`（跨机）+ 探针配置 + 依赖分级。
-- 编排引擎：拓扑排序、分层并行、就绪门控、逆序停止、环检测。
-- 前端依赖拓扑图（实时状态着色）+ **一键启动整条链路**。
-- 探针调度器：tcp/http/process/cmd 四类，含 startup/readiness/liveness 角色。
-- **验收判据**：一键让一整套有依赖关系的服务按正确顺序起来（本方案的最终目标）。
-
-## Phase 5 — Linux 适配 + 生产化增强
-- `LinuxSystemdBackend`（SSH 或同款 Agent 的 Linux 构建）。
-- 告警通知、操作审计、RBAC 权限、深色主题/i18n、状态自动刷新。
-
----
-
-## 关键文件与复用点
-- **直接复用/下沉为 Agent**：`core/winsw_manager.py`（`WinSWManager._execute/_run_command`、7 个操作）、`core/config_manager.py`（`ConfigManager` XML↔dict、`get_default_config`）。
-- **模板机制**：`templates/python.xml` 现为文档、未接代码——Phase 1 正式接入并扩充为多类型模板。
-- **日志增量读取**：`gui/tabs/log_viewer_tab.py` 的 `seek` 增量读取思路可复用为 Agent 的 `logs` API。
-- **新增目录**：`agent/`（FastAPI + backends）、`control_plane/`（后端+前端）、`orchestrator/`（DAG+探针）。
+## 关键复用点（贯穿各阶段）
+- **下沉为 Agent 后端**：`core/winsw_manager.py`（7 个操作，以 `config` dict 为输入自定位 XML）、`core/config_manager.py`（XML↔dict）。
+- **平台无关配置**：Phase 2 起服务配置为与平台无关的 dict，由各 backend 渲染为 WinSW XML / systemd unit。
+- **增量日志**：`gui/tabs/log_viewer_tab.py` 的 `seek` 增量读取 → Agent 的 `logs` API。
+- **批量交互**：Phase 1 的多选/批量分发理念 → Phase 3 经 CP 的远程批量。
+- **新增目录**：`agent/`、`control_plane/`（backend + frontend）、编排引擎（`control_plane/backend` 内）。
 
 ## 实施建议
-- 后续每个 Phase 进入实现前，单独再走一次 plan 流程细化该阶段设计。
-- Phase 2 起，每阶段实现后端到端跑通对应 API/界面再进入下一阶段。
+- 后续每个 Phase 进入实现前，先按其详细设计文档再走一次 plan 流程细化。
+- Phase 2 起，每阶段实现后端到端跑通对应 API/界面，再进入下一阶段。
+- 跨阶段的协议、命名、安全、数据模型通用约定见 [architecture.md](./architecture.md) 的「跨阶段通用约定」。
