@@ -2,7 +2,9 @@ import ctypes
 import os
 import sys
 import tkinter as tk
+from tkinter import messagebox
 
+from core.app_paths import AppPaths, AppPathsError
 from core.settings_manager import SettingsManager
 from gui.main_window import MainWindow
 
@@ -29,17 +31,23 @@ class App:
     """
     __version__ = "Preview 0.0.1"
 
-    def __init__(self, root):
+    def __init__(self, root, app_paths=None):
         self.root = root
+        self.app_paths = app_paths or AppPaths.discover()
         self.root.title(f"WinSW 图形化管理工具 by ztxtech ({self.__version__})")
 
         self.setup_directories()
         self.set_app_icon()
 
-        self.settings_manager = SettingsManager()
+        self.settings_manager = SettingsManager(self.app_paths)
         self.root.geometry(self.settings_manager.get('window_geometry'))
 
-        self.main_window = MainWindow(self.root, self.settings_manager, self.__version__)
+        self.main_window = MainWindow(
+            self.root,
+            self.settings_manager,
+            self.__version__,
+            self.app_paths,
+        )
         self.main_window.pack(expand=True, fill="both")
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -63,15 +71,12 @@ class App:
 
     def on_closing(self):
         """在窗口关闭前保存状态。"""
-        self.main_window.save_current_settings()
-        self.root.destroy()
+        if self.main_window.request_close():
+            self.root.destroy()
 
     def setup_directories(self):
         """创建程序所需的核心工作目录。"""
-        # 只创建运行时需要生成的目录
-        for dir_name in ["bin", "services", "logs"]:
-            if not os.path.exists(dir_name):
-                os.makedirs(dir_name)
+        self.app_paths.ensure_runtime_dirs()
 
 
 def set_dpi_awareness():
@@ -91,5 +96,10 @@ if __name__ == "__main__":
     set_dpi_awareness()
 
     root = tk.Tk()
-    app = App(root)
-    root.mainloop()
+    try:
+        app = App(root)
+    except AppPathsError as exc:
+        messagebox.showerror("启动失败", str(exc), parent=root)
+        root.destroy()
+    else:
+        root.mainloop()

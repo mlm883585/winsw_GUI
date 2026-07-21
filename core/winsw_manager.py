@@ -1,7 +1,7 @@
 import json
 import os
+from pathlib import Path
 import subprocess
-import sys
 
 import requests
 
@@ -12,16 +12,17 @@ class WinSWManager:
     采用全局WinSW.exe管理模式。
     """
 
-    def __init__(self, log_callback, settings_manager):
+    def __init__(self, log_callback, settings_manager, app_paths):
         self.log = log_callback
         self.settings_manager = settings_manager
-        self.base_dir = os.path.abspath(os.path.dirname(sys.argv[0]))
-        self.bin_dir = os.path.join(self.base_dir, "bin")
-        self.managed_winsw_path = os.path.join(self.bin_dir, "winsw-x64.exe")
+        self.app_paths = app_paths
+        self.bin_dir = Path(app_paths.bin_dir)
+        self.services_dir = Path(app_paths.services_dir).resolve()
+        self.managed_winsw_path = self.bin_dir / "winsw-x64.exe"
         self.github_api_url = "https://api.github.com/repos/winsw/winsw/releases"
         self.target_asset_name = "WinSW-x64.exe"
 
-        os.makedirs(self.bin_dir, exist_ok=True)
+        self.bin_dir.mkdir(parents=True, exist_ok=True)
 
     def _get_latest_winsw_download_url(self):
         """通过GitHub API获取最新的WinSW v3.x x64下载链接。"""
@@ -61,7 +62,7 @@ class WinSWManager:
         if mode == 'custom':
             custom_path = self.settings_manager.get('winsw_custom_path')
             if os.path.exists(custom_path):
-                return custom_path
+                return str(Path(custom_path).resolve())
             else:
                 self.log(f"错误: 自定义WinSW路径无效: {custom_path}")
                 return None
@@ -84,7 +85,7 @@ class WinSWManager:
                 self.log(f"错误: 下载WinSW失败。{e}")
                 return None
 
-        return self.managed_winsw_path
+        return str(self.managed_winsw_path)
 
     def _run_command(self, command_parts: list):
         """运行WinSW命令并返回输出。"""
@@ -101,7 +102,7 @@ class WinSWManager:
             self.log(f"运行命令时出错: {e}")
             return f"Error running command: {e}"
 
-    def _execute(self, command, config):
+    def _execute(self, command, config_path):
         """执行命令的统一入口。"""
         # 1. 获取WinSW.exe的路径
         winsw_path = self.get_winsw_path()
@@ -109,23 +110,23 @@ class WinSWManager:
             self.log("错误: 无法找到或下载 WinSW.exe。请检查设置和网络连接。")
             return
 
-        # 2. 获取服务ID和XML文件路径
-        service_id = config.get('id')
-        if not service_id:
-            self.log(f"错误: 服务ID为空，无法执行'{command}'命令。")
-            return
+        # 2. 使用刚刚成功保存的精确XML路径，避免按服务ID猜测文件名。
+        abs_xml_path = Path(config_path).resolve()
+        if (
+            os.path.normcase(str(abs_xml_path.parent))
+            != os.path.normcase(str(self.services_dir))
+            or abs_xml_path.suffix.lower() != ".xml"
+        ):
+            self.log(f"错误: 配置文件不在受管目录中: '{abs_xml_path}'。")
+            return None
 
-        xml_path = os.path.join("services", f"{service_id}.xml")
-        # 确保XML文件是绝对路径，以避免相对路径问题
-        abs_xml_path = os.path.abspath(xml_path)
-
-        if not os.path.exists(abs_xml_path):
+        if not abs_xml_path.is_file():
             self.log(f"错误: 找不到配置文件 '{abs_xml_path}'。请先保存配置。")
             return
 
         # --- 关键修正处 ---
         # 3. 对所有命令，都使用XML文件路径作为参数
-        command_parts = [winsw_path, command, abs_xml_path]
+        command_parts = [winsw_path, command, str(abs_xml_path)]
 
         # 4. 执行命令
         return self._run_command(command_parts)
