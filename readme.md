@@ -35,7 +35,7 @@ Recovery MVP 位于独立的 `orchestrator/` 包，不修改现有 Tkinter GUI�
 
   - 集成 **安装、卸载、启动、停止、重启、刷新、状态查询** 等所有常用控制命令，一键触达。
   - 操作前智能确认，防止误操作。
-  - 所有命令的输出实时显示在内置的程序控制台中。
+  - 命令结束后，标准输出和错误输出会显示在内置程序控制台中；后台执行、超时和逐行输出将在后续版本实现。
 
 - **📜 内嵌实时日志查看器**:
 
@@ -82,13 +82,21 @@ Recovery MVP 位于独立的 `orchestrator/` 包，不修改现有 Tkinter GUI�
    python main.py
    ```
 
+程序采用便携目录布局：`settings.json`、`services/`、`logs/` 和 `bin/` 位于源码根目录，打包后则位于 EXE 同级目录。该目录必须可写；程序不会改用当前工作目录保存数据。
+
 ## 使用说明
 
 1. **新建服务**: 点击“新建”按钮，清空当前界面。
 2. **填写配置**: 在右侧的各个 Tab（基本信息、执行与参数、日志记录等）中填写你的服务配置。
-3. **保存配置**: 点击“保存”按钮，一个以服务 ID 命名的 `.xml` 文件将被创建在 `services` 文件夹中。
+3. **保存配置**: 服务 ID 只能包含 ASCII 字母和数字（如 `MyService01`）。点击“保存”后，对应的 `.xml` 文件将创建在 `services` 文件夹中。
 4. **管理服务**: 选中左侧列表中的服务后，即可使用“安装”、“启动”、“停止”等按钮来控制你的 Windows 服务。
 5. **查看日志**: 在“日志查看”Tab 中实时监控服务的运行日志。
+
+导入外部 XML 时，程序只会打开一个未保存的编辑副本，不会修改源文件；确认内容后再保存到受管的 `services/` 目录。
+
+修改已有服务的 ID 会创建 `<新ID>.xml`，原配置继续保留。新建、导入或改 ID 遇到同名文件时，必须明确确认后才会覆盖。
+
+> **安全提示：** 服务账户密码会按 WinSW 约定以明文保存在本地 XML 中。`services/` 已被 Git 忽略，请勿提交或分享其中的凭据；文件 ACL 加固尚未实现。
 
 ## 开发与构建
 
@@ -96,8 +104,9 @@ Recovery MVP 位于独立的 `orchestrator/` 包，不修改现有 Tkinter GUI�
 
 1. **环境依赖**:
 
-   - Python 3.x
+   - Python 3.12
    - `requests`
+   - `pytest` (用于测试)
    - `pyinstaller` (用于打包)
 
 2. **自定义图标**:
@@ -115,6 +124,16 @@ Recovery MVP 位于独立的 `orchestrator/` 包，不修改现有 Tkinter GUI�
    ```
 
    - 打包好的可执行文件将出现在 `dist` 文件夹中。
+
+4. **运行测试与语法检查**:
+
+   ```bash
+   python -m pip install -r requirements.txt -r requirements-dev.txt
+   python -m pytest -q
+   python -m compileall -q core gui main.py
+   ```
+
+   GitHub Actions 会在 `windows-latest` 和 Python 3.12 环境中执行相同检查。
 
 ## 未来计划
 

@@ -47,5 +47,5 @@ class BasicInfoTab(ttk.Frame):
         return {
             'id': self.id_var.get(),
             'name': self.name_var.get(),
-            'description': self.desc_text.get("1.0", tk.END).strip()
+            'description': self.desc_text.get("1.0", "end-1c")
         }

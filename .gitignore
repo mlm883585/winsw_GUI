@@ -422,6 +422,7 @@ $RECYCLE.BIN/
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,linux,windows,python,jetbrains+all,pycharm
 /deploy/
+/bin/
 /services/
 /all_code.txt
 /logs/
@@ -429,3 +430,4 @@ bin/winsw-x64.exe
 .test-tmp/
 .agents/
 .claude/
+/settings.json

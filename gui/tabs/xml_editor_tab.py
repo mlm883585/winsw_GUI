@@ -7,10 +7,13 @@ class XmlEditorTab(ttk.Frame):
 
     def __init__(self, parent, main_window_callbacks):
         super().__init__(parent)
-        self.get_config_from_ui = main_window_callbacks['get_config']
-        self.set_config_to_ui = main_window_callbacks['set_config']
-        self.config_manager_to_xml_string = main_window_callbacks['to_xml_string']
-        self.config_manager_from_xml_string = main_window_callbacks['from_xml_string']
+        self.get_xml_callback = main_window_callbacks.get('get_xml')
+        self.apply_xml_callback = main_window_callbacks.get('apply_xml')
+        self.get_config_from_ui = main_window_callbacks.get('get_config')
+        self.set_config_to_ui = main_window_callbacks.get('set_config')
+        self.config_manager_to_xml_string = main_window_callbacks.get('to_xml_string')
+        self.config_manager_from_xml_string = main_window_callbacks.get('from_xml_string')
+        self._baseline_xml = ""
 
         self.create_widgets()
 
@@ -40,20 +43,38 @@ class XmlEditorTab(ttk.Frame):
 
     def load_from_ui(self):
         """根据当前所有UI字段生成XML并显示。"""
-        config = self.get_config_from_ui()
-        xml_string = self.config_manager_to_xml_string(config)
+        if self.get_xml_callback:
+            xml_string = self.get_xml_callback()
+        else:
+            config = self.get_config_from_ui()
+            xml_string = self.config_manager_to_xml_string(config)
         self.text_widget.delete("1.0", tk.END)
         self.text_widget.insert("1.0", xml_string)
+        self._baseline_xml = xml_string
+
+    def get_xml_text(self) -> str:
+        return self.text_widget.get("1.0", "end-1c")
+
+    def is_dirty(self) -> bool:
+        return self.get_xml_text() != self._baseline_xml
+
+    def mark_clean(self):
+        self._baseline_xml = self.get_xml_text()
 
     def apply_to_ui(self):
         """将当前文本框中的XML应用到所有UI字段。"""
         if not messagebox.askyesno("确认", "此操作将用XML源码覆盖所有UI字段的当前值。\n确定要继续吗？"):
             return
 
-        xml_string = self.text_widget.get("1.0", tk.END)
+        xml_string = self.get_xml_text()
         try:
-            config = self.config_manager_from_xml_string(xml_string)
-            self.set_config_to_ui(config)
+            if self.apply_xml_callback:
+                if self.apply_xml_callback(xml_string) is False:
+                    return
+            else:
+                config = self.config_manager_from_xml_string(xml_string)
+                self.set_config_to_ui(config)
+            self.mark_clean()
             messagebox.showinfo("成功", "XML已成功应用到UI字段。")
         except Exception as e:
             messagebox.showerror("解析失败", f"无法解析XML，请检查语法。\n错误: {e}")

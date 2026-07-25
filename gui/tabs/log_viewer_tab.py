@@ -1,5 +1,5 @@
 import os
-import sys
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -14,6 +14,7 @@ class LogViewerTab(ttk.Frame):
         self.last_positions = {}
         self.after_id = None
         self.current_config = None  # 保存当前服务的配置
+        self.current_config_path = None
         self.create_widgets()
 
     def create_widgets(self):
@@ -79,12 +80,13 @@ class LogViewerTab(ttk.Frame):
             messagebox.showinfo("完成", "没有找到需要清除的日志文件。")
 
         # 重新开始监控
-        self.start_monitoring(self.current_config)
+        self.start_monitoring(self.current_config, self.current_config_path)
 
-    def start_monitoring(self, config: dict):
+    def start_monitoring(self, config: dict, config_path):
         self.stop_monitoring()  # 先停止上一个监控
         self.current_config = config  # 保存当前配置
-        self._determine_log_paths(config)
+        self.current_config_path = Path(config_path).resolve()
+        self._determine_log_paths(config, self.current_config_path)
         self._clear_all_logs()
         self.log_to_all("--- 开始监控日志 ---\n")
         self.update_logs()
@@ -95,22 +97,36 @@ class LogViewerTab(ttk.Frame):
             self.log_to_all("\n--- 停止监控日志 ---\n")
         self.after_id = None
 
-    def _determine_log_paths(self, config: dict):
-        service_id = config.get('id')
-        if not service_id:
-            self.log_paths = {}
-            return
+    def clear_context(self):
+        """Stop monitoring and forget every path from the previous service."""
+        self.stop_monitoring()
+        self.current_config = None
+        self.current_config_path = None
+        self.log_paths = {}
+        self.last_positions = {suffix: 0 for suffix in self.log_texts}
+        self._clear_all_logs()
 
-        log_dir = config.get('logpath')
-        if not log_dir or not os.path.isdir(log_dir):
-            base_deploy_dir = os.path.join(os.path.abspath(os.path.dirname(sys.argv[0])), "deploy")
-            log_dir = os.path.join(base_deploy_dir, service_id)
+    @staticmethod
+    def resolve_log_paths(config: dict, config_path) -> dict[str, Path]:
+        """Resolve WinSW log names from the exact configuration file path."""
+        config_path = Path(config_path).resolve()
+        configured_path = config.get('logpath')
+        if configured_path:
+            log_dir = Path(os.path.expandvars(configured_path))
+            if not log_dir.is_absolute():
+                log_dir = config_path.parent / log_dir
+        else:
+            log_dir = config_path.parent
 
-        self.log_paths = {
-            "wrapper.log": os.path.join(log_dir, f"{service_id}.wrapper.log"),
-            "out.log": os.path.join(log_dir, f"{service_id}.out.log"),
-            "err.log": os.path.join(log_dir, f"{service_id}.err.log"),
+        config_name = config_path.stem
+        return {
+            "wrapper.log": log_dir / f"{config_name}.wrapper.log",
+            "out.log": log_dir / f"{config_name}.out.log",
+            "err.log": log_dir / f"{config_name}.err.log",
         }
+
+    def _determine_log_paths(self, config: dict, config_path):
+        self.log_paths = self.resolve_log_paths(config, config_path)
         self.last_positions = {key: 0 for key in self.log_paths}
 
     def update_logs(self):
