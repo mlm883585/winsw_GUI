@@ -13,6 +13,10 @@
 这不仅仅是一个配置生成器，更是一个集 **服务创建、编辑、控制、日志查看**
 于一体的一站式管理平台。无论你是初次接触 WinSW 的新手，还是寻求效率提升的专家，这款工具都将成为你的得力助手。
 
+> 当前稳定版本仍是本机 Windows GUI。Windows 多机冷启动 Recovery MVP 已完成首版代码、非秘密 Inventory/Host Facts、Frozen 本机构建烟雾和只读部署门禁，但尚未通过真实三机连续 10 次断电验收，不能标记为生产可用；详见 [部署与验收手册](docs/recovery-mvp-operations.md)、[冻结合同](docs/contracts/recovery-mvp-v1.md)、[Inventory 合同](docs/contracts/recovery-deployment-inventory-v1.md)、[验收证据合同](docs/contracts/recovery-mvp-evidence-v1.md) 与 [演进路线图](docs/roadmap.md)。
+
+Recovery MVP 位于独立的 `orchestrator/` 包，不修改现有 Tkinter GUI，也不接管业务服务配置或 WinSW XML。它仅适用于受控实验局域网的 HTTP + Token 部署；Agent 只操作 `agent.json` allowlist 中已注册且保持 Manual 的 Windows Service。
+
 ## ✨ 界面概览
 
 ![界面](etc/screenshot/main.png)

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% macro render_time(value) -%}
+  {% if value %}<time datetime="{{ value }}">{{ value }}</time>{% else %}<span class="not-occurred">未发生</span>{% endif %}
+{%- endmacro %}
+{% block title %}RecoveryRun {{ run.run_id }}{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><h1>RecoveryRun</h1><p class="mono muted">{{ run.run_id }}</p></div>
+  {% if run.status in ["FAILED", "UNKNOWN"] %}<button data-run-retry data-run-id="{{ run.run_id }}">重试整图</button>{% endif %}
+</div>
+
+<section class="panel">
+  <dl class="facts">
+    <div><dt>状态</dt><dd><span class="badge {{ run.status|lower }}">{{ run.status }}</span></dd></div>
+    <div><dt>触发</dt><dd>{{ run.trigger }}</dd></div>
+    <div><dt>恢复组</dt><dd class="mono compact">{{ run.group_id }}</dd></div>
+    <div><dt>Epoch</dt><dd class="mono compact">{{ run.epoch or "MANUAL" }}</dd></div>
+    <div><dt>Retry 来源</dt><dd class="mono compact">{{ run.retry_of_run_id or "无" }}</dd></div>
+    <div><dt>原因</dt><dd>{{ run.reason or "无" }}</dd></div>
+    <div class="wide-fact"><dt>失败</dt><dd>{% if run.failure_code or run.failure_message %}{{ run.failure_code or "无错误码" }}{% if run.failure_message %} · {{ run.failure_message }}{% endif %}{% else %}无{% endif %}</dd></div>
+  </dl>
+
+  <h2 class="panel-subheading">Run 时间</h2>
+  <dl class="facts time-facts">
+    <div><dt>Created</dt><dd>{{ render_time(run.created_at) }}</dd></div>
+    <div><dt>Started</dt><dd>{{ render_time(run.started_at) }}</dd></div>
+    <div><dt>Finished</dt><dd>{{ render_time(run.finished_at) }}</dd></div>
+    <div><dt>Updated</dt><dd>{{ render_time(run.updated_at) }}</dd></div>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>步骤时间线</h2>
+  <div class="timeline">
+  {% for step in run.steps %}
+    {% set member_ref = namespace(value=none) %}
+    {% for member in run.members_snapshot %}
+      {% if member.managed_service_id == step.managed_service_id %}{% set member_ref.value = member %}{% endif %}
+    {% endfor %}
+    <article id="step-{{ step.step_id }}" class="step {{ step.status|lower }}">
+      <header>
+        <strong>
+          Level {{ step.topology_level }} ·
+          {% if member_ref.value %}{{ member_ref.value.display_name }}{% else %}{{ step.local_service_id }}{% endif %}
+          <span class="service-local-id">({{ step.local_service_id }})</span>
+        </strong>
+        <span class="badge {{ step.status|lower }}">{{ step.status }}</span>
+      </header>
+      <p class="step-identity mono compact">Step {{ step.step_id }}{% if member_ref.value %} · Windows Service {{ member_ref.value.windows_service_name }}{% endif %}</p>
+      <p class="step-message"><strong>结果说明：</strong>{{ step.message or "无" }}</p>
+
+      <dl class="facts compact-facts">
+        <div><dt>Operation</dt><dd class="mono compact">{{ step.operation_id or "无" }}</dd></div>
+        <div>
+          <dt>根因步骤</dt>
+          <dd>
+          {% if step.root_cause_step_id %}
+            {% set root_ref = namespace(step=none, member=none) %}
+            {% for candidate in run.steps %}
+              {% if candidate.step_id == step.root_cause_step_id %}{% set root_ref.step = candidate %}{% endif %}
+            {% endfor %}
+            {% if root_ref.step %}
+              {% for member in run.members_snapshot %}
+                {% if member.managed_service_id == root_ref.step.managed_service_id %}{% set root_ref.member = member %}{% endif %}
+              {% endfor %}
+              <a class="cause-link" href="#step-{{ root_ref.step.step_id }}">
+                {% if root_ref.member %}{{ root_ref.member.display_name }}{% else %}{{ root_ref.step.local_service_id }}{% endif %}
+                <span class="service-local-id">({{ root_ref.step.local_service_id }})</span>
+                <span class="badge {{ root_ref.step.status|lower }}">{{ root_ref.step.status }}</span>
+              </a>
+            {% else %}
+              <span class="error-text">未找到根因步骤（记录不完整：<span class="mono">{{ step.root_cause_step_id }}</span>）</span>
+            {% endif %}
+          {% elif step.status in ["FAILED", "UNKNOWN"] %}
+            <a class="cause-link" href="#step-{{ step.step_id }}">
+              本步骤 · {% if member_ref.value %}{{ member_ref.value.display_name }}{% else %}{{ step.local_service_id }}{% endif %}
+              <span class="service-local-id">({{ step.local_service_id }})</span>
+              <span class="badge {{ step.status|lower }}">{{ step.status }}</span>
+            </a>
+          {% elif step.status == "BLOCKED" %}
+            <span class="error-text">未记录根因步骤</span>
+          {% else %}
+            <span class="muted">无</span>
+          {% endif %}
+          </dd>
+        </div>
+      </dl>
+
+      <div class="dependency-block">
+        <h3>依赖阻塞链</h3>
+        {% if step.dependency_chain %}
+        <ol class="dependency-chain">
+          {% for chain_step_id in step.dependency_chain %}
+            {% set chain_ref = namespace(step=none, member=none) %}
+            {% for candidate in run.steps %}
+              {% if candidate.step_id == chain_step_id %}{% set chain_ref.step = candidate %}{% endif %}
+            {% endfor %}
+            {% if chain_ref.step %}
+              {% for member in run.members_snapshot %}
+                {% if member.managed_service_id == chain_ref.step.managed_service_id %}{% set chain_ref.member = member %}{% endif %}
+              {% endfor %}
+              <li>
+                <a href="#step-{{ chain_ref.step.step_id }}">
+                  {% if chain_ref.member %}{{ chain_ref.member.display_name }}{% else %}{{ chain_ref.step.local_service_id }}{% endif %}
+                  <span class="service-local-id">({{ chain_ref.step.local_service_id }})</span>
+                  <span class="badge {{ chain_ref.step.status|lower }}">{{ chain_ref.step.status }}</span>
+                </a>
+              </li>
+            {% else %}
+              <li class="error-text">未找到步骤（记录不完整：<span class="mono">{{ chain_step_id }}</span>）</li>
+            {% endif %}
+          {% endfor %}
+        </ol>
+        {% elif step.status == "BLOCKED" %}
+          <p class="error-text">未记录依赖阻塞链</p>
+        {% else %}
+          <p class="muted">无</p>
+        {% endif %}
+      </div>
+
+      <h3>Step 时间</h3>
+      <dl class="facts time-facts">
+        <div><dt>Created</dt><dd>{{ render_time(step.created_at) }}</dd></div>
+        <div><dt>Started</dt><dd>{{ render_time(step.started_at) }}</dd></div>
+        <div><dt>Finished</dt><dd>{{ render_time(step.finished_at) }}</dd></div>
+        <div><dt>Updated</dt><dd>{{ render_time(step.updated_at) }}</dd></div>
+      </dl>
+
+      {% if step.warnings %}<p class="warning-text">Warnings: {{ step.warnings|join(", ") }}</p>{% endif %}
+      {% if step.probe_attempts %}
+      <details class="probe-attempts">
+        <summary>Probe attempts ({{ step.probe_attempts|length }})</summary>
+        <ol class="probe-attempt-list">
+        {% for attempt in step.probe_attempts %}
+          <li class="probe-attempt">
+            <header>
+              <strong>Attempt #{{ attempt.attempt }}</strong>
+              <span class="badge {{ 'ready' if attempt.result.passed else 'failed' }}">{{ "PASSED" if attempt.result.passed else "FAILED" }}</span>
+            </header>
+            <dl class="facts time-facts probe-facts">
+              <div><dt>Started</dt><dd>{{ render_time(attempt.started_at) }}</dd></div>
+              <div><dt>Finished</dt><dd>{{ render_time(attempt.finished_at) }}</dd></div>
+              <div><dt>Observed</dt><dd>{{ render_time(attempt.result.observed_at) }}</dd></div>
+              <div><dt>Code</dt><dd class="mono">{{ attempt.result.code }}</dd></div>
+              <div><dt>Latency</dt><dd>{{ attempt.result.latency_ms }} ms</dd></div>
+              <div><dt>Message</dt><dd>{{ attempt.result.message }}</dd></div>
+            </dl>
+          </li>
+        {% endfor %}
+        </ol>
+      </details>
+      {% else %}
+        <p class="muted">Probe attempts：无</p>
+      {% endif %}
+    </article>
+  {% else %}
+    <p class="empty">该 Run 尚无步骤记录</p>
+  {% endfor %}
+  </div>
+</section>
+{% endblock %}

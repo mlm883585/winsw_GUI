@@ -1,0 +1,743 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Windows Recovery MVP Agent API
+  version: 1.0.0
+  summary: Recovery MVP v1 的单机 Agent 权威线上合同
+  description: |
+    Agent 只观察和操作 `agent.json` allowlist 中预先注册的 Windows Service，不安装服务、
+    不接管 WinSW XML，也不提供命令、PowerShell、文件或任意 URL 执行能力。
+
+    除 `/healthz` 外，所有接口只接受 Control Plane 使用实验 `cluster_token` 发出的 Bearer
+    请求，并同时校验 socket peer IP。Agent 不读取 `X-Forwarded-For`，默认禁用 CORS。
+    本规范的明文 HTTP 仅用于实验或受控管理网，固定报告 `LAB_HTTP` 与
+    `production_ready=false`。
+servers:
+  - url: http://{agent_ip}:{agent_port}
+    description: 单台 Windows Server 上的 Agent
+    variables:
+      agent_ip:
+        default: 127.0.0.1
+      agent_port:
+        default: "8765"
+tags:
+  - name: Health
+  - name: Agent
+  - name: Services
+  - name: Operations
+  - name: Probes
+security:
+  - clusterToken: []
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getAgentHealth
+      summary: 获取最小进程存活信息
+      description: 不访问 SCM，不返回主机资产、allowlist、Token 或恢复拓扑。
+      security: []
+      responses:
+        "200":
+          description: Agent 可处理 HTTP 请求。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                component: agent
+                version: 0.1.0
+
+  /api/v1/agent:
+    get:
+      tags: [Agent]
+      operationId: getAgent
+      summary: 获取 Agent 身份、实例 fencing 信息与能力
+      responses:
+        "200":
+          description: 当前 Agent 进程身份。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentInfo"
+              example:
+                agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                boot_id: dba11591-4a51-49bb-8cf0-7e3c2e85e517
+                agent_instance_id: a82a5615-dcf8-4f8a-a266-dfe935f83b27
+                instance_generation: 7
+                hostname: APP-SRV-01
+                endpoint: http://10.20.0.11:8765
+                version: 0.1.0
+                protocol_version: recovery-mvp-v1
+                security_mode: LAB_HTTP
+                production_ready: false
+                capabilities:
+                  service_actions: [start, stop, restart]
+                  probe_kinds: [scm, tcp, http]
+                  arbitrary_command: false
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/services:
+    get:
+      tags: [Services]
+      operationId: listObservedServices
+      summary: 列出 allowlist 服务及 SCM 观察状态
+      description: |
+        只返回配置中的 `local_service_id`，不会枚举其他 Windows Service。SCM 状态映射固定为：
+        RUNNING→ACTIVE、STOPPED 且退出码为零→INACTIVE、STOPPED 且退出码非零→FAILED、
+        START_PENDING→STARTING、STOP_PENDING→STOPPING；
+        PAUSED、PAUSE_PENDING、CONTINUE_PENDING、访问拒绝及未知值均为 UNKNOWN。启动类型
+        AUTO/DELAYED_AUTO→AUTOSTART_ENABLED、DEMAND→AUTOSTART_DISABLED、DISABLED→START_BLOCKED。
+      responses:
+        "200":
+          description: allowlist 服务快照。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObservedServiceCollection"
+              example:
+                items:
+                  - local_service_id: mysql
+                    windows_service_name: MySQL80
+                    display_name: MySQL 8
+                    installation_state: INSTALLED
+                    runtime_state: ACTIVE
+                    startup_state: AUTOSTART_DISABLED
+                    last_observed_at: "2026-07-16T08:00:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/services/{local_service_id}/actions/{action}:
+    post:
+      tags: [Operations]
+      operationId: createServiceOperation
+      summary: 请求受限 SCM start、stop 或 restart
+      description: |
+        `Idempotency-Key` 在本 Agent 全局唯一。指纹固定为
+        `UPPER(method) + "\n" + canonical_path + "\n" + canonical_json_body` 的 SHA-256；本接口
+        正文可省略；若提供只能是严格空对象 `{}`，canonical JSON 固定为 `{}`。路由、Header、allowlist 校验失败直接返回 4xx，
+        不创建 Operation；服务已定位后的状态或活动锁冲突创建 `REJECTED` Operation 并返回 202。
+
+        Operation 与持久化活动锁在 `BEGIN IMMEDIATE` 中提交后才能调用 SCM。同服务串行，
+        不同服务可并行。start/stop 对已达目标状态为 no-op SUCCEEDED；restart 只接受 ACTIVE。
+      parameters:
+        - $ref: "#/components/parameters/LocalServiceId"
+        - $ref: "#/components/parameters/ServiceAction"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmptyActionRequest"
+            example: {}
+      responses:
+        "202":
+          description: Operation 已持久化；状态可为 PENDING 或已确定的 REJECTED/SUCCEEDED。
+          headers:
+            Location:
+              $ref: "#/components/headers/OperationLocation"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+              examples:
+                pending:
+                  value:
+                    operation_id: 1e881030-2451-4d7f-9628-6a58c2912e14
+                    agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                    local_service_id: mysql
+                    windows_service_name: MySQL80
+                    action: start
+                    status: PENDING
+                    idempotency_key: db7df82f-c129-4e7a-bc51-6bcd4433fe74
+                    request_fingerprint: 10bcff34a8469ba0c193fab8b37b733a88dd0b5e7c381e8f6098b6c1878c0f25
+                    created_at: "2026-07-16T08:00:02Z"
+                    updated_at: "2026-07-16T08:00:02Z"
+                    started_at: null
+                    finished_at: null
+                    error_code: null
+                    message: null
+                rejected:
+                  value:
+                    operation_id: e23bd7c5-b92f-47f8-9520-a38a2412765d
+                    agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                    local_service_id: mysql
+                    windows_service_name: MySQL80
+                    action: restart
+                    status: REJECTED
+                    idempotency_key: 46f73c19-64c7-48b2-80b8-f6c25044e94a
+                    request_fingerprint: e048b9fac9e8c82f4dad5b57c7f98b6ce9388b2cb0c67000c1012ca4d5e4afb1
+                    created_at: "2026-07-16T08:00:02Z"
+                    updated_at: "2026-07-16T08:00:02Z"
+                    started_at: null
+                    finished_at: "2026-07-16T08:00:02Z"
+                    error_code: SERVICE_ACTION_CONFLICT
+                    message: Another action is active for this service
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/operations/{operation_id}:
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      summary: 查询持久化 Operation
+      description: "`UNKNOWN` 是公开终态，调用方不得据此自动重放动作。"
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation 当前状态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/probe:
+    post:
+      tags: [Probes]
+      operationId: executeProbe
+      summary: 执行一次 scm、tcp 或 http readiness probe
+      description: |
+        TCP host 只接受 `localhost` 或 Agent 当前实际绑定的 IP literal；拒绝 DNS 名称与
+        IPv4-mapped IPv6。HTTP 固定 GET，只允许 http，拒绝 userinfo、请求体、自定义 Header、
+        所有重定向和环境代理，最多读取 64 KiB。响应正文不写日志、不回传。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProbeRequest"
+            examples:
+              scm:
+                value:
+                  kind: scm
+                  local_service_id: mysql
+                  timeout_seconds: 2
+              tcp:
+                value:
+                  kind: tcp
+                  host: 127.0.0.1
+                  port: 3306
+                  timeout_seconds: 2
+              http:
+                value:
+                  kind: http
+                  url: http://127.0.0.1:8848/nacos/actuator/health
+                  expected_status: 200
+                  body_contains: UP
+                  timeout_seconds: 2
+      responses:
+        "200":
+          description: 探针已执行；未通过以 `passed=false` 表示，不以 HTTP 失败码表示。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProbeResult"
+              example:
+                passed: true
+                observed_at: "2026-07-16T08:00:10Z"
+                latency_ms: 12
+                code: TCP_CONNECTED
+                message: TCP endpoint accepted a connection
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+components:
+  securitySchemes:
+    clusterToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-cluster-token
+      description: 至少 32 个随机字节；只通过 Authorization Header 传输并常量时间比较。
+  parameters:
+    LocalServiceId:
+      name: local_service_id
+      in: path
+      required: true
+      description: "`agent.json` allowlist 中唯一的小写 slug。"
+      schema:
+        $ref: "#/components/schemas/ServiceSlug"
+    ServiceAction:
+      name: action
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/ServiceAction"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+  headers:
+    OperationLocation:
+      description: Operation 查询路径。
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+        example: /api/v1/operations/1e881030-2451-4d7f-9628-6a58c2912e14
+  responses:
+    Unauthorized:
+      description: 缺少或提供了无效 cluster token。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: AUTH_INVALID
+            message: Bearer token is missing or invalid
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    Forbidden:
+      description: socket peer IP 不在 Control Plane 来源白名单。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: SOURCE_IP_DENIED
+            message: Source address is not allowed
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    NotFound:
+      description: local service 不在 allowlist，或 Operation 不存在。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: SERVICE_NOT_ALLOWLISTED
+            message: Service is not present in the Agent allowlist
+            detail:
+              local_service_id: unknown-service
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    Conflict:
+      description: Idempotency-Key 已用于不同请求指纹。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: IDEMPOTENCY_KEY_REUSED
+            message: Idempotency-Key belongs to a different request
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    UnprocessableEntity:
+      description: JSON 可解析，但字段或跨字段约束无效。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: VALIDATION_ERROR
+            message: One or more fields are invalid
+            detail:
+              fields:
+                - path: body.timeout_seconds
+                  reason: must be between 0.1 and 10
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+  schemas:
+    UuidV4:
+      type: string
+      format: uuid
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      description: Agent 响应中的规范小写 UUIDv4。
+    UuidV4Input:
+      type: string
+      format: uuid
+      pattern: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$"
+      description: 请求 Header 或路径接受规范连字符形式的大小写 UUIDv4；响应统一输出小写。
+    Sha256:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    ServiceSlug:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    ServiceAction:
+      type: string
+      enum: [start, stop, restart]
+    InstallationState:
+      type: string
+      enum: [INSTALLED, NOT_INSTALLED, UNKNOWN]
+    RuntimeState:
+      type: string
+      enum: [ACTIVE, INACTIVE, STARTING, STOPPING, FAILED, UNKNOWN]
+    StartupState:
+      type: string
+      enum: [AUTOSTART_ENABLED, AUTOSTART_DISABLED, START_BLOCKED, UNKNOWN]
+    OperationStatus:
+      type: string
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED, REJECTED, UNKNOWN]
+    ErrorCode:
+      type: string
+      enum:
+        - AUTH_REQUIRED
+        - AUTH_INVALID
+        - SOURCE_IP_DENIED
+        - STALE_AGENT_INSTANCE
+        - ENDPOINT_SOURCE_MISMATCH
+        - ROUTE_NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - INTERNAL_ERROR
+        - VALIDATION_ERROR
+        - IDEMPOTENCY_KEY_REQUIRED
+        - IDEMPOTENCY_KEY_INVALID
+        - IDEMPOTENCY_KEY_REUSED
+        - AGENT_NOT_FOUND
+        - AGENT_OFFLINE
+        - SERVICE_NOT_ALLOWLISTED
+        - SERVICE_MAPPING_CHANGED
+        - SERVICE_NOT_INSTALLED
+        - SERVICE_STATE_UNKNOWN
+        - SERVICE_ACTION_CONFLICT
+        - SERVICE_IN_ACTIVE_RUN
+        - SCM_ACTION_FAILED
+        - SCM_ACTION_TIMEOUT
+        - OPERATION_NOT_FOUND
+        - AGENT_PROTOCOL_MISMATCH
+        - PROBE_TARGET_DENIED
+        - PROBE_UNSUPPORTED
+        - PROBE_FAILED
+        - DEPENDENCY_CYCLE
+        - GROUP_NOT_READY
+        - RUN_NOT_FOUND
+    EmptyActionRequest:
+      type: object
+      maxProperties: 0
+      additionalProperties: false
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, component, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        component:
+          type: string
+          const: agent
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+    AgentCapabilities:
+      type: object
+      additionalProperties: false
+      required: [service_actions, probe_kinds, arbitrary_command]
+      properties:
+        service_actions:
+          type: array
+          minItems: 3
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/ServiceAction"
+        probe_kinds:
+          type: array
+          minItems: 3
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            enum: [scm, tcp, http]
+        arbitrary_command:
+          type: boolean
+          const: false
+    AgentInfo:
+      type: object
+      additionalProperties: false
+      required:
+        - agent_id
+        - boot_id
+        - agent_instance_id
+        - instance_generation
+        - hostname
+        - endpoint
+        - version
+        - protocol_version
+        - security_mode
+        - production_ready
+        - capabilities
+      properties:
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        boot_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_instance_id:
+          $ref: "#/components/schemas/UuidV4"
+        instance_generation:
+          type: integer
+          minimum: 1
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 255
+        endpoint:
+          type: string
+          format: uri
+          pattern: '^http://(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}$'
+          description: 无 userinfo、path、query 或 fragment 的 IP-literal:port。
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        protocol_version:
+          type: string
+          const: recovery-mvp-v1
+        security_mode:
+          type: string
+          const: LAB_HTTP
+        production_ready:
+          type: boolean
+          const: false
+        capabilities:
+          $ref: "#/components/schemas/AgentCapabilities"
+    ObservedService:
+      type: object
+      additionalProperties: false
+      required:
+        - local_service_id
+        - windows_service_name
+        - display_name
+        - installation_state
+        - runtime_state
+        - startup_state
+        - last_observed_at
+      properties:
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        installation_state:
+          $ref: "#/components/schemas/InstallationState"
+        runtime_state:
+          $ref: "#/components/schemas/RuntimeState"
+        startup_state:
+          $ref: "#/components/schemas/StartupState"
+        last_observed_at:
+          type: string
+          format: date-time
+    ObservedServiceCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ObservedService"
+    Operation:
+      type: object
+      additionalProperties: false
+      required:
+        - operation_id
+        - agent_id
+        - local_service_id
+        - windows_service_name
+        - action
+        - status
+        - idempotency_key
+        - request_fingerprint
+        - created_at
+        - updated_at
+        - started_at
+        - finished_at
+        - error_code
+        - message
+      properties:
+        operation_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        action:
+          $ref: "#/components/schemas/ServiceAction"
+        status:
+          $ref: "#/components/schemas/OperationStatus"
+        idempotency_key:
+          $ref: "#/components/schemas/UuidV4"
+        request_fingerprint:
+          $ref: "#/components/schemas/Sha256"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+        error_code:
+          oneOf:
+            - $ref: "#/components/schemas/ErrorCode"
+            - type: "null"
+        message:
+          type: [string, "null"]
+          maxLength: 1024
+    ProbeTimeoutSeconds:
+      type: number
+      minimum: 0.1
+      maximum: 10
+      default: 2
+    ScmProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, local_service_id]
+      properties:
+        kind:
+          type: string
+          const: scm
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        timeout_seconds:
+          $ref: "#/components/schemas/ProbeTimeoutSeconds"
+    TcpProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, host, port]
+      properties:
+        kind:
+          type: string
+          const: tcp
+        host:
+          anyOf:
+            - type: string
+              const: localhost
+            - type: string
+              format: ipv4
+            - type: string
+              format: ipv6
+          description: 还必须是 Agent 本机实际绑定地址；IPv4-mapped IPv6 永远拒绝。
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        timeout_seconds:
+          $ref: "#/components/schemas/ProbeTimeoutSeconds"
+    HttpProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, url, expected_status]
+      properties:
+        kind:
+          type: string
+          const: http
+        url:
+          type: string
+          format: uri
+          pattern: "^http://"
+          maxLength: 2048
+          description: host 必须为 localhost 或 Agent 本机 IP literal；禁止 userinfo。
+        expected_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        body_contains:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 256
+        timeout_seconds:
+          $ref: "#/components/schemas/ProbeTimeoutSeconds"
+    ProbeRequest:
+      oneOf:
+        - $ref: "#/components/schemas/ScmProbeRequest"
+        - $ref: "#/components/schemas/TcpProbeRequest"
+        - $ref: "#/components/schemas/HttpProbeRequest"
+      discriminator:
+        propertyName: kind
+        mapping:
+          scm: "#/components/schemas/ScmProbeRequest"
+          tcp: "#/components/schemas/TcpProbeRequest"
+          http: "#/components/schemas/HttpProbeRequest"
+    ProbeResult:
+      type: object
+      additionalProperties: false
+      required: [passed, observed_at, latency_ms, code, message]
+      properties:
+        passed:
+          type: boolean
+        observed_at:
+          type: string
+          format: date-time
+        latency_ms:
+          type: integer
+          minimum: 0
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Z][A-Z0-9_]*$"
+        message:
+          type: string
+          maxLength: 512
+          description: 不得包含响应正文、Token、密码或底层命令行。
+    ErrorDetail:
+      oneOf:
+        - type: object
+          additionalProperties: true
+        - type: "null"
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, detail, request_id]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        detail:
+          $ref: "#/components/schemas/ErrorDetail"
+        request_id:
+          $ref: "#/components/schemas/UuidV4"

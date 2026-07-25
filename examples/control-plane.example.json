@@ -1,0 +1,17 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 8766,
+  "database_path": "data/control-plane.sqlite3",
+  "cluster_token": "REQUIRED",
+  "agent_source_cidrs": [
+    "10.20.0.0/24"
+  ],
+  "offline_after_seconds": 45,
+  "agent_request_timeout_seconds": 10,
+  "agent_request_attempts": 3,
+  "admin_username": "admin",
+  "admin_password_hash": "REQUIRED",
+  "session_secret": "REQUIRED",
+  "session_cookie_name": "recovery_admin_session",
+  "session_max_age_seconds": 28800
+}

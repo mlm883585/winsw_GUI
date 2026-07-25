@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "component": "WinSW",
+  "version": "2.12.0",
+  "release_channel": "stable-2.x",
+  "release_commit": "eef5bad",
+  "release_published_at": "2023-01-28T16:22:38Z",
+  "release_is_draft": false,
+  "release_is_prerelease": false,
+  "architecture": "x64",
+  "asset_name": "WinSW-x64.exe",
+  "release_url": "https://github.com/winsw/winsw/releases/tag/v2.12.0",
+  "download_url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+  "sha256": "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da",
+  "size_bytes": 18243033,
+  "authenticode_status": "NotSigned",
+  "verified_at": "2026-07-16",
+  "verification_method": "GitHub release API metadata checked; fixed asset downloaded and hashed locally.",
+  "usage_scope": "Recovery MVP lab deployment"
+}

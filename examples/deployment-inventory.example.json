@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "deployment_name": "recovery-lab",
+  "control_plane": {
+    "node_id": "control-plane",
+    "hostname": "WIN-CP01",
+    "windows_version": "10.0.20348",
+    "architecture": "64-bit",
+    "address": "10.20.0.10",
+    "listen_port": 8766,
+    "data_directory": "C:\\ProgramData\\WinSW-Recovery\\ControlPlane"
+  },
+  "agents": [
+    {
+      "node_id": "node-db",
+      "hostname": "WIN-DB01",
+      "windows_version": "10.0.20348",
+      "architecture": "64-bit",
+      "address": "10.20.0.11",
+      "active_unicast_ips": [
+        "10.20.0.11"
+      ],
+      "listen_port": 8765,
+      "data_directory": "C:\\ProgramData\\WinSW-Recovery\\Agent",
+      "services": [
+        {
+          "service_id": "mysql",
+          "windows_service_name": "MySQL80",
+          "display_name": "MySQL 8",
+          "startup_mode": "Manual",
+          "readiness": {
+            "kind": "tcp",
+            "host": "10.20.0.11",
+            "port": 3306,
+            "timeout_seconds": 2.0,
+            "interval_seconds": 3,
+            "deadline_seconds": 60
+          }
+        },
+        {
+          "service_id": "redis",
+          "windows_service_name": "redis",
+          "display_name": "Redis",
+          "startup_mode": "Manual",
+          "readiness": {
+            "kind": "tcp",
+            "host": "10.20.0.11",
+            "port": 6379,
+            "timeout_seconds": 2.0,
+            "interval_seconds": 3,
+            "deadline_seconds": 60
+          }
+        }
+      ]
+    },
+    {
+      "node_id": "node-app",
+      "hostname": "WIN-APP01",
+      "windows_version": "10.0.20348",
+      "architecture": "64-bit",
+      "address": "10.20.0.12",
+      "active_unicast_ips": [
+        "10.20.0.12"
+      ],
+      "listen_port": 8765,
+      "data_directory": "C:\\ProgramData\\WinSW-Recovery\\Agent",
+      "services": [
+        {
+          "service_id": "nacos",
+          "windows_service_name": "nacos",
+          "display_name": "Nacos",
+          "startup_mode": "Manual",
+          "readiness": {
+            "kind": "http",
+            "url": "http://10.20.0.12:8848/health",
+            "expected_status": 200,
+            "timeout_seconds": 2.0,
+            "interval_seconds": 3,
+            "deadline_seconds": 60
+          }
+        },
+        {
+          "service_id": "java",
+          "windows_service_name": "java-api",
+          "display_name": "Java API",
+          "startup_mode": "Manual",
+          "readiness": {
+            "kind": "http",
+            "url": "http://10.20.0.12:8080/actuator/health/readiness",
+            "expected_status": 200,
+            "timeout_seconds": 2.0,
+            "interval_seconds": 3,
+            "deadline_seconds": 60
+          }
+        }
+      ]
+    },
+    {
+      "node_id": "node-web",
+      "hostname": "WIN-WEB01",
+      "windows_version": "10.0.20348",
+      "architecture": "64-bit",
+      "address": "10.20.0.13",
+      "active_unicast_ips": [
+        "10.20.0.13"
+      ],
+      "listen_port": 8765,
+      "data_directory": "C:\\ProgramData\\WinSW-Recovery\\Agent",
+      "services": [
+        {
+          "service_id": "nginx",
+          "windows_service_name": "nginx",
+          "display_name": "Nginx",
+          "startup_mode": "Manual",
+          "readiness": {
+            "kind": "http",
+            "url": "http://10.20.0.13:80/healthz",
+            "expected_status": 200,
+            "timeout_seconds": 2.0,
+            "interval_seconds": 3,
+            "deadline_seconds": 60
+          }
+        }
+      ]
+    }
+  ],
+  "recovery_groups": [
+    {
+      "group_id": "primary-stack",
+      "name": "Primary application stack",
+      "description": "MySQL and Redis before Nacos, Java, and Nginx",
+      "node_settle_window_seconds": 120,
+      "max_parallel_services": 4,
+      "service_ids": [
+        "mysql",
+        "redis",
+        "nacos",
+        "java",
+        "nginx"
+      ],
+      "dependencies": [
+        {
+          "dependent_service_id": "nacos",
+          "prerequisite_service_id": "mysql"
+        },
+        {
+          "dependent_service_id": "nacos",
+          "prerequisite_service_id": "redis"
+        },
+        {
+          "dependent_service_id": "java",
+          "prerequisite_service_id": "nacos"
+        },
+        {
+          "dependent_service_id": "nginx",
+          "prerequisite_service_id": "java"
+        }
+      ]
+    }
+  ],
+  "acceptance_roles": {
+    "mysql": "mysql",
+    "redis": "redis",
+    "nacos": "nacos",
+    "java": "java",
+    "nginx": "nginx"
+  }
+}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · WinSW Recovery{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><h1>Dashboard</h1><p class="muted">在线只表示心跳租约有效；READY 只由 RecoveryRun 的 readiness 决定。</p></div>
+  <button type="button" onclick="location.reload()">刷新</button>
+</div>
+
+<section class="panel">
+  <h2>Agents</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>主机</th><th>状态</th><th>boot_id</th><th>instance / generation</th><th>最后心跳</th><th>Endpoint</th></tr></thead>
+    <tbody>
+    {% for agent in agents %}
+      <tr>
+        <td>{{ agent.hostname }}</td>
+        <td><span class="badge {{ agent.online_status|lower }}">{{ agent.online_status }}</span></td>
+        <td class="mono compact">{{ agent.boot_id }}</td>
+        <td class="mono compact">{{ agent.agent_instance_id }} / {{ agent.instance_generation }}</td>
+        <td>{{ agent.last_received_at }}</td>
+        <td class="mono">{{ agent.endpoint }}</td>
+      </tr>
+    {% else %}<tr><td colspan="6" class="empty">尚无 Agent 注册</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>Recent Recovery Runs</h2>
+  <p class="muted">包括后台 Scheduler 创建的 AUTO Run；点击 Run ID 查看完整步骤与探针时间线。</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>创建时间</th><th>触发</th><th>状态</th><th>恢复组</th><th>Run</th><th>原因</th></tr></thead>
+    <tbody>
+    {% for run in recent_runs %}
+      <tr>
+        <td>{{ run.created_at }}</td>
+        <td><span class="badge {{ run.trigger|lower }}">{{ run.trigger }}</span></td>
+        <td><span class="badge {{ run.status|lower }}">{{ run.status }}</span></td>
+        <td><a class="mono compact" href="/groups?group={{ run.group_id }}">{{ run.group_id }}</a></td>
+        <td><a class="mono compact" href="/runs/{{ run.run_id }}">{{ run.run_id }}</a></td>
+        <td>{{ run.reason or "—" }}</td>
+      </tr>
+    {% else %}<tr><td colspan="6" class="empty">尚无 RecoveryRun</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+
+<section class="panel">
+  <h2>Managed Services</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>主机 / 服务</th><th>安装</th><th>运行</th><th>启动策略</th><th>最后观察</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for service in services %}
+      <tr>
+        <td><strong>{{ service.display_name }}</strong><br><span class="mono muted">{{ service.local_service_id }} · {{ service.windows_service_name }}</span></td>
+        <td>{{ service.installation_state }}</td>
+        <td><span class="badge {{ service.runtime_state|lower }}">{{ service.runtime_state }}</span></td>
+        <td>{{ service.startup_state }}</td>
+        <td>{{ service.last_observed_at }}</td>
+        <td class="actions">
+          {% for action in ["start", "stop", "restart"] %}
+          <button data-service-action data-service-id="{{ service.managed_service_id }}" data-action="{{ action }}">{{ action }}</button>
+          {% endfor %}
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="6" class="empty">Agent 尚未上报 allowlist 服务</td></tr>{% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endblock %}

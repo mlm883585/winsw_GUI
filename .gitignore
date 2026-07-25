@@ -235,6 +235,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+dist-recovery*
 downloads/
 eggs/
 .eggs/
@@ -425,3 +426,6 @@ $RECYCLE.BIN/
 /all_code.txt
 /logs/
 bin/winsw-x64.exe
+.test-tmp/
+.agents/
+.claude/

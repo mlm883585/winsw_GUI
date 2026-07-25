@@ -1,0 +1,30 @@
+{
+  "schema_version": "recovery-mvp-evidence-v1",
+  "campaign": {
+    "campaign_id": "21e4a0bd-a04f-42fc-8b53-f20a638c3858",
+    "name": "Windows Recovery MVP three-node acceptance",
+    "environment": "replace-with-environment-name",
+    "required_rounds": 10,
+    "service_roles": {
+      "mysql": "15f21884-ad22-4ed2-b08e-fb3c2f395010",
+      "redis": "d41a663e-745b-41d0-a5b9-2146824919e5",
+      "nacos": "f9e7537e-5c7b-4c31-b8fd-ddd8ff50ae68",
+      "java": "e77d4f06-c32a-471f-9e43-a08203bd3ac7",
+      "nginx": "e46d83ba-7152-4253-86bd-662d8e8338db"
+    }
+  },
+  "completeness_attestation": {
+    "operator": "replace-with-operator",
+    "exported_at": "2026-07-20T12:00:00+08:00",
+    "all_runs_in_declared_windows": false,
+    "all_action_attempts_in_declared_windows": false,
+    "source_description": "Replace after exporting every CP Run and Agent action from all cold-round and scenario windows"
+  },
+  "inventory": {
+    "items": []
+  },
+  "rounds": [],
+  "scenario_exercises": [],
+  "runs": [],
+  "actions": []
+}

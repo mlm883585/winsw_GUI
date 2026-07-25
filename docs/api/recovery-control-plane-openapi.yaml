@@ -1,0 +1,1811 @@
+openapi: 3.1.0
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+info:
+  title: Windows Recovery MVP Control Plane API
+  version: 1.0.0
+  summary: Recovery MVP v1 的单实例 Control Plane 权威线上合同
+  description: |
+    Control Plane 接收 Agent 主动注册/心跳，维护服务镜像，并按严格依赖 DAG 调度
+    RecoveryRun。Agent ingress 只接受实验 `cluster_token`；管理 API 只接受管理员签名
+    Session，且所有管理写请求同时要求 CSRF Header。两类凭据不可互换。
+
+    HTTP 明文模式只允许实验或受控管理网。Control Plane 必须部署在独立管理节点，
+    其 SQLite 不得依赖被管理的 MySQL、Redis 或 Nacos。
+servers:
+  - url: http://{control_plane_ip}:{control_plane_port}
+    description: 单实例 Windows Control Plane
+    variables:
+      control_plane_ip:
+        default: 127.0.0.1
+      control_plane_port:
+        default: "8766"
+tags:
+  - name: Health
+  - name: Agent ingress
+  - name: Inventory
+  - name: Service actions
+  - name: Recovery groups
+  - name: Recovery runs
+security:
+  - adminSession: []
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getControlPlaneHealth
+      summary: 获取最小进程存活信息
+      security: []
+      responses:
+        "200":
+          description: Control Plane 可处理 HTTP 请求。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                component: control-plane
+                version: 0.1.0
+
+  /api/v1/agents/register:
+    post:
+      tags: [Agent ingress]
+      operationId: registerAgent
+      summary: 注册 Agent 当前进程实例
+      description: |
+        只接受比已存 generation 更大的实例，或完全相同 `(instance_generation,
+        agent_instance_id)` 的重试。完全相同实例仍执行 sequence 规则：sequence 不大于
+        last_sequence 时幂等忽略，且不刷新 lease、endpoint 或服务镜像。更小 generation 或
+        同 generation 不同 instance 返回 `409 STALE_AGENT_INSTANCE`。CP 只接受无 userinfo/path/query/fragment 的
+        `http://IP-literal:port`，以 socket peer IP 和已校验端口重建 endpoint，不读取
+        `X-Forwarded-For`。
+      security:
+        - clusterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentReport"
+            example:
+              agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+              boot_id: dba11591-4a51-49bb-8cf0-7e3c2e85e517
+              agent_instance_id: a82a5615-dcf8-4f8a-a266-dfe935f83b27
+              instance_generation: 7
+              sequence: 1
+              version: 0.1.0
+              endpoint: http://10.20.0.11:8765
+              hostname: APP-SRV-01
+              services:
+                - local_service_id: mysql
+                  windows_service_name: MySQL80
+                  display_name: MySQL 8
+                  installation_state: INSTALLED
+                  runtime_state: INACTIVE
+                  startup_state: AUTOSTART_DISABLED
+                  last_observed_at: "2026-07-16T08:00:00Z"
+      responses:
+        "200":
+          description: 注册已接受；完全相同实例的重试也返回 200。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatAck"
+              example:
+                accepted: true
+                ignored: false
+                reason: ACCEPTED
+                received_at: "2026-07-16T08:00:01Z"
+                lease_updated_at: "2026-07-16T08:00:01Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/agents/{agent_id}/heartbeat:
+    post:
+      tags: [Agent ingress]
+      operationId: ingestHeartbeat
+      summary: 接收已注册实例的主动心跳
+      description: |
+        路径与正文 agent_id 必须相同，且 `(agent_instance_id, instance_generation)` 必须为
+        当前已注册实例。旧实例返回 `STALE_AGENT_INSTANCE`。同一实例中
+        `sequence <= last_sequence` 的报告返回 200 并忽略，且不刷新 received_at 或服务镜像。
+      security:
+        - clusterToken: []
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentReport"
+      responses:
+        "200":
+          description: 心跳已接受，或作为重复/乱序报告幂等忽略。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatAck"
+              examples:
+                accepted:
+                  value:
+                    accepted: true
+                    ignored: false
+                    reason: ACCEPTED
+                    received_at: "2026-07-16T08:00:11Z"
+                    lease_updated_at: "2026-07-16T08:00:11Z"
+                ignored:
+                  value:
+                    accepted: false
+                    ignored: true
+                    reason: DUPLICATE_OR_OUT_OF_ORDER
+                    received_at: "2026-07-16T08:00:12Z"
+                    lease_updated_at: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/agents:
+    get:
+      tags: [Inventory]
+      operationId: listAgents
+      summary: 列出 Agent 在线租约
+      description: "`ONLINE/OFFLINE` 仅由 CP 接收时间和 45 秒 lease timeout 计算。"
+      responses:
+        "200":
+          description: Agent 当前租约。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentCollection"
+              example:
+                items:
+                  - agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                    boot_id: dba11591-4a51-49bb-8cf0-7e3c2e85e517
+                    agent_instance_id: a82a5615-dcf8-4f8a-a266-dfe935f83b27
+                    instance_generation: 7
+                    hostname: APP-SRV-01
+                    endpoint: http://10.20.0.11:8765
+                    version: 0.1.0
+                    online_status: ONLINE
+                    last_sequence: 18
+                    last_received_at: "2026-07-16T08:03:01Z"
+                    offline_after_seconds: 45
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/services:
+    get:
+      tags: [Inventory]
+      operationId: listManagedServices
+      summary: 列出 CP 服务镜像
+      responses:
+        "200":
+          description: 每项以 CP 分配的 `managed_service_id` 标识。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedServiceCollection"
+              example:
+                items:
+                  - managed_service_id: 72961a6e-35cd-46c8-b405-56d73dbf3619
+                    agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                    agent_online_status: ONLINE
+                    local_service_id: mysql
+                    windows_service_name: MySQL80
+                    display_name: MySQL 8
+                    installation_state: INSTALLED
+                    runtime_state: ACTIVE
+                    startup_state: AUTOSTART_DISABLED
+                    last_observed_at: "2026-07-16T08:00:00Z"
+                    mirrored_at: "2026-07-16T08:00:01Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/services/{managed_service_id}/actions/{action}:
+    post:
+      tags: [Service actions]
+      operationId: proxyServiceAction
+      summary: 代理单服务 start、stop 或 restart
+      description: |
+        CP 将 managed_service_id 映射为所属 Agent 的 local_service_id。涉及非终态 RecoveryRun
+        独占的服务返回 `409 SERVICE_IN_ACTIVE_RUN`。Idempotency-Key 原样传给 Agent。正文可省略；
+        若提供只能是严格空对象 `{}`。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/ManagedServiceId"
+        - $ref: "#/components/parameters/ServiceAction"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmptyActionRequest"
+            example: {}
+      responses:
+        "202":
+          description: Agent Operation 已创建或命中幂等记录。
+          headers:
+            Location:
+              $ref: "#/components/headers/OperationLocation"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProxiedOperation"
+              example:
+                managed_service_id: 72961a6e-35cd-46c8-b405-56d73dbf3619
+                operation_id: 1e881030-2451-4d7f-9628-6a58c2912e14
+                agent_id: b8d82b70-5a8a-4c07-8f44-31ef85a6aa01
+                local_service_id: mysql
+                windows_service_name: MySQL80
+                action: start
+                status: PENDING
+                idempotency_key: db7df82f-c129-4e7a-bc51-6bcd4433fe74
+                request_fingerprint: 7bc1e2673f2333ac92a479a3aa55e91fc19451269d5c2f33c3423178b00026e8
+                created_at: "2026-07-16T08:00:02Z"
+                updated_at: "2026-07-16T08:00:02Z"
+                started_at: null
+                finished_at: null
+                error_code: null
+                message: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/operations/{operation_id}:
+    get:
+      tags: [Service actions]
+      operationId: getProxiedOperation
+      summary: 查询 CP 代理创建的 Agent Operation
+      parameters:
+        - $ref: "#/components/parameters/OperationId"
+      responses:
+        "200":
+          description: Operation 当前状态；UNKNOWN 不得自动重放。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProxiedOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/recovery-groups:
+    get:
+      tags: [Recovery groups]
+      operationId: listRecoveryGroups
+      summary: 列出恢复组
+      responses:
+        "200":
+          description: 恢复组及其当前触发状态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroupCollection"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Recovery groups]
+      operationId: createRecoveryGroup
+      summary: 创建未 arm 的空恢复组
+      security:
+        - adminSession: []
+          csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryGroupCreate"
+            example:
+              name: core-stack
+              description: MySQL and Redis to Nacos to Java to Nginx
+              node_settle_window_seconds: 120
+              max_parallel_services: 4
+      responses:
+        "201":
+          description: 恢复组已创建。
+          headers:
+            Location:
+              $ref: "#/components/headers/RecoveryGroupLocation"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/recovery-groups/{group_id}:
+    get:
+      tags: [Recovery groups]
+      operationId: getRecoveryGroup
+      summary: 获取恢复组完整配置与状态
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      responses:
+        "200":
+          description: 恢复组、成员、依赖和探针。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Recovery groups]
+      operationId: updateRecoveryGroup
+      summary: 更新 DISARMED 恢复组元数据
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryGroupPatch"
+      responses:
+        "200":
+          description: 更新后的恢复组。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      tags: [Recovery groups]
+      operationId: deleteRecoveryGroup
+      summary: 删除 DISARMED 且无活动 Run 的恢复组
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      responses:
+        "204":
+          description: 已删除。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/recovery-groups/{group_id}/members:
+    put:
+      tags: [Recovery groups]
+      operationId: replaceRecoveryGroupMembers
+      summary: 原子替换 managed service 成员
+      description: >-
+        只允许 DISARMED 且无活动 Run 的组；所有所属 Agent 自动成为 required nodes。
+        新加入的服务必须仍在所属 Agent 最近一次有效报告中；既有 tombstone 成员可保留或移除，
+        但移除后在恢复上报前重新加入将返回 404 SERVICE_NOT_ALLOWLISTED，且成员集合不变。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryMembersWrite"
+            example:
+              managed_service_ids:
+                - 72961a6e-35cd-46c8-b405-56d73dbf3619
+                - 55ca6143-a86c-4bf2-8863-d6befc77689a
+      responses:
+        "200":
+          description: 成员已原子替换。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/recovery-groups/{group_id}/dependencies:
+    put:
+      tags: [Recovery groups]
+      operationId: replaceRecoveryDependencies
+      summary: 原子替换严格依赖边
+      description: |
+        `managed_service_id` 是下游，`prerequisite_managed_service_id` 是上游。写入前以 Kahn
+        算法校验成员完整性与无环；环返回 `409 DEPENDENCY_CYCLE`，不保存部分结果。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveryDependenciesWrite"
+            example:
+              dependencies:
+                - managed_service_id: 55ca6143-a86c-4bf2-8863-d6befc77689a
+                  prerequisite_managed_service_id: 72961a6e-35cd-46c8-b405-56d73dbf3619
+      responses:
+        "200":
+          description: 依赖已原子替换。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/recovery-groups/{group_id}/services/{managed_service_id}/probe:
+    get:
+      tags: [Recovery groups]
+      operationId: getReadinessProbe
+      summary: 获取一个成员的显式 readiness
+      description: 未配置返回 404；Run 使用 SCM fallback 并记录 `READINESS_FALLBACK_SCM`。
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+        - $ref: "#/components/parameters/ManagedServiceId"
+      responses:
+        "200":
+          description: 显式 readiness 配置。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessProbe"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Recovery groups]
+      operationId: putReadinessProbe
+      summary: 创建或替换唯一 readiness
+      description: 只允许 DISARMED 且无活动 Run；deadline_seconds 必须不小于 timeout_seconds。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+        - $ref: "#/components/parameters/ManagedServiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReadinessProbeWrite"
+            example:
+              kind: tcp
+              host: 127.0.0.1
+              port: 3306
+              timeout_seconds: 2
+              interval_seconds: 3
+              deadline_seconds: 60
+      responses:
+        "200":
+          description: readiness 已创建或替换。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessProbe"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+    delete:
+      tags: [Recovery groups]
+      operationId: deleteReadinessProbe
+      summary: 删除显式 readiness，恢复 SCM fallback
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+        - $ref: "#/components/parameters/ManagedServiceId"
+      responses:
+        "204":
+          description: 已删除；不存在时也幂等成功。
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/recovery-groups/{group_id}/arm:
+    post:
+      tags: [Recovery groups]
+      operationId: armRecoveryGroup
+      summary: 校验恢复组并记录当前 epoch 基线
+      description: |
+        DISARMED 时，所有 required Agent 必须在线，服务必须 INSTALLED 且
+        AUTOSTART_DISABLED，图必须无环；成功仅保存 baseline_epoch，不创建 AUTO Run、不启动服务。
+        其他任意状态重复调用均幂等返回当前组，不重置 baseline、candidate、settle 计时或 Run。
+        BLOCKED_PRECONDITION 必须显式 disarm、修复后重新 arm 才能解除。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      responses:
+        "200":
+          description: 首次 arm 后进入 ARMED_IDLE；已 arm 时返回未改变的当前组。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /api/v1/recovery-groups/{group_id}/disarm:
+    post:
+      tags: [Recovery groups]
+      operationId: disarmRecoveryGroup
+      summary: 停止后续 AUTO 触发
+      description: 不停止服务，也不中断已创建的 Run；重复调用幂等成功。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      responses:
+        "200":
+          description: 组已 DISARMED。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryGroup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/recovery-groups/{group_id}/runs:
+    post:
+      tags: [Recovery runs]
+      operationId: createManualRun
+      summary: 校验并创建 MANUAL RecoveryRun
+      description: |
+        required nodes、安装/启动策略和无环校验全部通过后才创建 PENDING Run，并在同一事务
+        独占全部 managed_service_id。与其他活动 Run 冲突返回 `SERVICE_IN_ACTIVE_RUN`。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/GroupId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualRunRequest"
+            example:
+              reason: Validate before the first power-loss drill
+      responses:
+        "202":
+          description: Run 与图/探针快照已持久化。
+          headers:
+            Location:
+              $ref: "#/components/headers/RecoveryRunLocation"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/recovery-runs:
+    get:
+      tags: [Recovery runs]
+      operationId: listRecoveryRuns
+      summary: 发现 AUTO/MANUAL RecoveryRun
+      description: |
+        按 `created_at DESC, run_id DESC` 使用稳定 keyset 游标分页。`cursor` 为不透明、
+        带版本且绑定当前 `group_id`、`trigger`、`status` 过滤条件的值；格式错误、版本
+        不支持、字段非法或跨过滤条件复用均统一返回脱敏的 `422 VALIDATION_ERROR`。
+        后台 Scheduler 创建的 AUTO Run 无需调用方预知 run_id 即可发现。
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: "#/components/parameters/RunGroupFilter"
+        - $ref: "#/components/parameters/RunTriggerFilter"
+        - $ref: "#/components/parameters/RunStatusFilter"
+        - $ref: "#/components/parameters/RunLimit"
+        - $ref: "#/components/parameters/RunCursor"
+      responses:
+        "200":
+          description: 当前页 Run 与可选下一页游标。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryRunCollection"
+              example:
+                items: []
+                next_cursor: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+  /api/v1/recovery-runs/{run_id}:
+    get:
+      tags: [Recovery runs]
+      operationId: getRecoveryRun
+      summary: 获取 Run、持久化快照与步骤时间线
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: 每次 probe attempt、Operation、警告和阻塞根因均可见。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/recovery-runs/{run_id}/retry:
+    post:
+      tags: [Recovery runs]
+      operationId: retryRecoveryRun
+      summary: 从终态父 Run 快照创建新 MANUAL Run
+      description: |
+        复制父 Run 的图与探针快照并重跑整图；已 ACTIVE 的服务仍执行 readiness。每个 Step
+        生成新的 dispatch_idempotency_key。父 Run 必须为 FAILED 或 UNKNOWN；非终态返回 409。
+      security:
+        - adminSession: []
+          csrfToken: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualRunRequest"
+      responses:
+        "202":
+          description: 新 MANUAL Run 已持久化。
+          headers:
+            Location:
+              $ref: "#/components/headers/RecoveryRunLocation"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveryRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+
+components:
+  securitySchemes:
+    clusterToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-cluster-token
+      description: 仅用于 Agent 注册/心跳；至少 32 个随机字节并常量时间比较。
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: recovery_admin_session
+      description: 单管理员登录后签发的 HttpOnly、SameSite 签名 Session Cookie。
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: 所有管理 API 写请求必须与管理员 Session 中的 CSRF 值匹配。
+  parameters:
+    AgentId:
+      name: agent_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    ManagedServiceId:
+      name: managed_service_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    GroupId:
+      name: group_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    OperationId:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    ServiceAction:
+      name: action
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [start, stop, restart]
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    RunGroupFilter:
+      name: group_id
+      in: query
+      required: false
+      description: 只返回指定恢复组的 Run。
+      schema:
+        $ref: "#/components/schemas/UuidV4Input"
+    RunTriggerFilter:
+      name: trigger
+      in: query
+      required: false
+      description: 只返回 AUTO 或 MANUAL Run。
+      schema:
+        $ref: "#/components/schemas/RunTrigger"
+    RunStatusFilter:
+      name: status
+      in: query
+      required: false
+      description: 只返回指定终态或活动态的 Run。
+      schema:
+        $ref: "#/components/schemas/RunStatus"
+    RunLimit:
+      name: limit
+      in: query
+      required: false
+      description: 当前页最大条数。
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    RunCursor:
+      name: cursor
+      in: query
+      required: false
+      description: 上一页返回的不透明游标；不得解析、修改或跨过滤条件复用。
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 2048
+  headers:
+    OperationLocation:
+      description: CP Operation 查询路径。
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+    RecoveryGroupLocation:
+      description: 新恢复组资源路径。
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+    RecoveryRunLocation:
+      description: RecoveryRun 查询路径。
+      required: true
+      schema:
+        type: string
+        format: uri-reference
+  responses:
+    Unauthorized:
+      description: 对当前接口缺少正确的 cluster token 或管理员 Session。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: AUTH_INVALID
+            message: Authentication credential is missing or invalid
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    Forbidden:
+      description: 管理写请求缺少/错误 CSRF，或来源策略拒绝。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: SOURCE_IP_DENIED
+            message: Source address is not allowed
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    NotFound:
+      description: Agent、service、Operation、group 或 Run 不存在。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: RUN_NOT_FOUND
+            message: RecoveryRun was not found
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    Conflict:
+      description: fencing、Agent 离线、依赖、组前置条件、幂等或服务独占冲突。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: GROUP_NOT_READY
+            message: Recovery group preconditions are not satisfied
+            detail:
+              group_state: BLOCKED_PRECONDITION
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+    UnprocessableEntity:
+      description: JSON 可解析，但字段或跨字段约束无效。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: VALIDATION_ERROR
+            message: One or more fields are invalid
+            detail: null
+            request_id: 7cf653dc-3bba-428e-8d5e-1bfd9220a60f
+  schemas:
+    UuidV4:
+      type: string
+      format: uuid
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    UuidV4Input:
+      type: string
+      format: uuid
+      pattern: "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-4[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$"
+    Sha256:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    ServiceSlug:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    InstallationState:
+      type: string
+      enum: [INSTALLED, NOT_INSTALLED, UNKNOWN]
+    RuntimeState:
+      type: string
+      enum: [ACTIVE, INACTIVE, STARTING, STOPPING, FAILED, UNKNOWN]
+    StartupState:
+      type: string
+      enum: [AUTOSTART_ENABLED, AUTOSTART_DISABLED, START_BLOCKED, UNKNOWN]
+    AgentOnlineStatus:
+      type: string
+      enum: [ONLINE, OFFLINE]
+    OperationStatus:
+      type: string
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED, REJECTED, UNKNOWN]
+    GroupState:
+      type: string
+      enum: [DISARMED, ARMED_IDLE, WAITING_FOR_NODES, SETTLING, BLOCKED_PRECONDITION, RUNNING]
+    RunTrigger:
+      type: string
+      enum: [AUTO, MANUAL]
+    RunStatus:
+      type: string
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED, UNKNOWN]
+    StepStatus:
+      type: string
+      enum: [PENDING, WAITING_DEPENDENCY, STARTING, PROBING, READY, FAILED, BLOCKED, UNKNOWN]
+    ErrorCode:
+      type: string
+      enum:
+        - AUTH_REQUIRED
+        - AUTH_INVALID
+        - SOURCE_IP_DENIED
+        - STALE_AGENT_INSTANCE
+        - ENDPOINT_SOURCE_MISMATCH
+        - ROUTE_NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - INTERNAL_ERROR
+        - VALIDATION_ERROR
+        - IDEMPOTENCY_KEY_REQUIRED
+        - IDEMPOTENCY_KEY_INVALID
+        - IDEMPOTENCY_KEY_REUSED
+        - AGENT_NOT_FOUND
+        - AGENT_OFFLINE
+        - SERVICE_NOT_ALLOWLISTED
+        - SERVICE_MAPPING_CHANGED
+        - SERVICE_NOT_INSTALLED
+        - SERVICE_STATE_UNKNOWN
+        - SERVICE_ACTION_CONFLICT
+        - SERVICE_IN_ACTIVE_RUN
+        - SCM_ACTION_FAILED
+        - SCM_ACTION_TIMEOUT
+        - OPERATION_NOT_FOUND
+        - AGENT_PROTOCOL_MISMATCH
+        - PROBE_TARGET_DENIED
+        - PROBE_UNSUPPORTED
+        - PROBE_FAILED
+        - DEPENDENCY_CYCLE
+        - GROUP_NOT_READY
+        - RUN_NOT_FOUND
+    EmptyActionRequest:
+      type: object
+      maxProperties: 0
+      additionalProperties: false
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, component, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        component:
+          type: string
+          const: control-plane
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+    ObservedService:
+      type: object
+      additionalProperties: false
+      required: [local_service_id, windows_service_name, display_name, installation_state, runtime_state, startup_state, last_observed_at]
+      properties:
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        installation_state:
+          $ref: "#/components/schemas/InstallationState"
+        runtime_state:
+          $ref: "#/components/schemas/RuntimeState"
+        startup_state:
+          $ref: "#/components/schemas/StartupState"
+        last_observed_at:
+          type: string
+          format: date-time
+    AgentReport:
+      type: object
+      additionalProperties: false
+      required: [agent_id, boot_id, agent_instance_id, instance_generation, sequence, version, endpoint, hostname, services]
+      properties:
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        boot_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_instance_id:
+          $ref: "#/components/schemas/UuidV4"
+        instance_generation:
+          type: integer
+          minimum: 1
+        sequence:
+          type: integer
+          minimum: 1
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        endpoint:
+          type: string
+          format: uri
+          pattern: '^http://(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[[0-9A-Fa-f:]+\]):[0-9]{1,5}$'
+          description: 无 userinfo、path、query 或 fragment 的 IP-literal:port；host 必须匹配 peer。
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 255
+        services:
+          type: array
+          minItems: 1
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ObservedService"
+    HeartbeatAck:
+      type: object
+      additionalProperties: false
+      required: [accepted, ignored, reason, received_at, lease_updated_at]
+      properties:
+        accepted:
+          type: boolean
+        ignored:
+          type: boolean
+        reason:
+          type: string
+          enum: [ACCEPTED, DUPLICATE_OR_OUT_OF_ORDER]
+        received_at:
+          type: string
+          format: date-time
+        lease_updated_at:
+          type: [string, "null"]
+          format: date-time
+    AgentSummary:
+      type: object
+      additionalProperties: false
+      required: [agent_id, boot_id, agent_instance_id, instance_generation, hostname, endpoint, version, online_status, last_sequence, last_received_at, offline_after_seconds]
+      properties:
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        boot_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_instance_id:
+          $ref: "#/components/schemas/UuidV4"
+        instance_generation:
+          type: integer
+          minimum: 1
+        hostname:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+        version:
+          type: string
+        online_status:
+          $ref: "#/components/schemas/AgentOnlineStatus"
+        last_sequence:
+          type: integer
+          minimum: 1
+        last_received_at:
+          type: string
+          format: date-time
+        offline_after_seconds:
+          type: integer
+          const: 45
+    AgentCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/AgentSummary"
+    ManagedService:
+      type: object
+      additionalProperties: false
+      required: [managed_service_id, agent_id, agent_online_status, local_service_id, windows_service_name, display_name, installation_state, runtime_state, startup_state, last_observed_at, mirrored_at]
+      properties:
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_online_status:
+          $ref: "#/components/schemas/AgentOnlineStatus"
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        installation_state:
+          $ref: "#/components/schemas/InstallationState"
+        runtime_state:
+          $ref: "#/components/schemas/RuntimeState"
+        startup_state:
+          $ref: "#/components/schemas/StartupState"
+        last_observed_at:
+          type: string
+          format: date-time
+        mirrored_at:
+          type: string
+          format: date-time
+    ManagedServiceCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ManagedService"
+    ProxiedOperation:
+      type: object
+      additionalProperties: false
+      required: [managed_service_id, operation_id, agent_id, local_service_id, windows_service_name, action, status, idempotency_key, request_fingerprint, created_at, updated_at, started_at, finished_at, error_code, message]
+      properties:
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        operation_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        action:
+          type: string
+          enum: [start, stop, restart]
+        status:
+          $ref: "#/components/schemas/OperationStatus"
+        idempotency_key:
+          $ref: "#/components/schemas/UuidV4"
+        request_fingerprint:
+          $ref: "#/components/schemas/Sha256"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+        error_code:
+          oneOf:
+            - $ref: "#/components/schemas/ErrorCode"
+            - type: "null"
+        message:
+          type: [string, "null"]
+          maxLength: 1024
+    RecoveryGroupCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 0
+          maxLength: 1024
+          default: ""
+        node_settle_window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+          default: 120
+        max_parallel_services:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 4
+    RecoveryGroupPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 0
+          maxLength: 1024
+        node_settle_window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        max_parallel_services:
+          type: integer
+          minimum: 1
+          maximum: 4
+    RecoveryMember:
+      type: object
+      additionalProperties: false
+      required: [managed_service_id, agent_id, local_service_id, windows_service_name, display_name]
+      properties:
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        windows_service_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 256
+    RecoveryDependency:
+      type: object
+      additionalProperties: false
+      required: [managed_service_id, prerequisite_managed_service_id]
+      properties:
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        prerequisite_managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+    RecoveryMembersWrite:
+      type: object
+      additionalProperties: false
+      required: [managed_service_ids]
+      properties:
+        managed_service_ids:
+          type: array
+          minItems: 1
+          maxItems: 1024
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/UuidV4"
+    RecoveryDependenciesWrite:
+      type: object
+      additionalProperties: false
+      required: [dependencies]
+      properties:
+        dependencies:
+          type: array
+          maxItems: 16384
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/RecoveryDependency"
+    ProbeTiming:
+      type: object
+      description: deadline_seconds 必须不小于 timeout_seconds。
+      properties:
+        timeout_seconds:
+          type: number
+          minimum: 0.1
+          maximum: 10
+          default: 2
+        interval_seconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        deadline_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 60
+    ScmReadinessWrite:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          const: scm
+        timeout_seconds:
+          type: number
+          minimum: 0.1
+          maximum: 10
+          default: 2
+        interval_seconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        deadline_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 60
+    TcpReadinessWrite:
+      type: object
+      additionalProperties: false
+      required: [kind, host, port]
+      properties:
+        kind:
+          type: string
+          const: tcp
+        host:
+          anyOf:
+            - type: string
+              const: localhost
+            - type: string
+              format: ipv4
+            - type: string
+              format: ipv6
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        timeout_seconds:
+          type: number
+          minimum: 0.1
+          maximum: 10
+          default: 2
+        interval_seconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        deadline_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 60
+    HttpReadinessWrite:
+      type: object
+      additionalProperties: false
+      required: [kind, url, expected_status]
+      properties:
+        kind:
+          type: string
+          const: http
+        url:
+          type: string
+          format: uri
+          pattern: "^http://"
+          maxLength: 2048
+        expected_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        body_contains:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 256
+        timeout_seconds:
+          type: number
+          minimum: 0.1
+          maximum: 10
+          default: 2
+        interval_seconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        deadline_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 60
+    ReadinessProbeWrite:
+      oneOf:
+        - $ref: "#/components/schemas/ScmReadinessWrite"
+        - $ref: "#/components/schemas/TcpReadinessWrite"
+        - $ref: "#/components/schemas/HttpReadinessWrite"
+      discriminator:
+        propertyName: kind
+        mapping:
+          scm: "#/components/schemas/ScmReadinessWrite"
+          tcp: "#/components/schemas/TcpReadinessWrite"
+          http: "#/components/schemas/HttpReadinessWrite"
+    ReadinessProbe:
+      type: object
+      additionalProperties: false
+      required: [probe_id, group_id, managed_service_id, definition, created_at, updated_at]
+      properties:
+        probe_id:
+          $ref: "#/components/schemas/UuidV4"
+        group_id:
+          $ref: "#/components/schemas/UuidV4"
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        definition:
+          $ref: "#/components/schemas/ReadinessProbeWrite"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    PreconditionIssue:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[^\u0000]*$'
+          description: Unicode scalar values only; U+0000 is forbidden.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[^\u0000]*$'
+          description: Unicode scalar values only; U+0000 is forbidden.
+        managed_service_id:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+        agent_id:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+        managed_service_ids:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/UuidV4"
+    RecoveryGroup:
+      type: object
+      additionalProperties: false
+      required: [group_id, name, description, state, node_settle_window_seconds, max_parallel_services, baseline_epoch, candidate_epoch, candidate_stable_since, settle_deadline_at, last_scheduled_epoch, missing_agent_ids, blocked_reasons, members, dependencies, probes, created_at, updated_at]
+      properties:
+        group_id:
+          $ref: "#/components/schemas/UuidV4"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        description:
+          type: string
+          minLength: 0
+          maxLength: 1024
+        state:
+          $ref: "#/components/schemas/GroupState"
+        node_settle_window_seconds:
+          type: integer
+          minimum: 1
+          maximum: 3600
+        max_parallel_services:
+          type: integer
+          minimum: 1
+          maximum: 4
+        baseline_epoch:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256"
+            - type: "null"
+        candidate_epoch:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256"
+            - type: "null"
+        candidate_stable_since:
+          type: [string, "null"]
+          format: date-time
+        settle_deadline_at:
+          type: [string, "null"]
+          format: date-time
+        last_scheduled_epoch:
+          oneOf:
+            - $ref: "#/components/schemas/Sha256"
+            - type: "null"
+        missing_agent_ids:
+          type: array
+          maxItems: 1024
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/UuidV4"
+        blocked_reasons:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/PreconditionIssue"
+        members:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/RecoveryMember"
+        dependencies:
+          type: array
+          maxItems: 16384
+          items:
+            $ref: "#/components/schemas/RecoveryDependency"
+        probes:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ReadinessProbe"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RecoveryGroupCollection:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/RecoveryGroup"
+    ManualRunRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 512
+    ProbeResult:
+      type: object
+      additionalProperties: false
+      required: [passed, observed_at, latency_ms, code, message]
+      properties:
+        passed:
+          type: boolean
+        observed_at:
+          type: string
+          format: date-time
+        latency_ms:
+          type: integer
+          minimum: 0
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]*$"
+          maxLength: 64
+        message:
+          type: string
+          maxLength: 512
+    ProbeAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt, started_at, finished_at, result]
+      properties:
+        attempt:
+          type: integer
+          minimum: 1
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        result:
+          $ref: "#/components/schemas/ProbeResult"
+    RecoveryStep:
+      type: object
+      additionalProperties: false
+      required: [step_id, managed_service_id, agent_id, local_service_id, status, topology_level, dispatch_idempotency_key, operation_id, probe_attempts, warnings, root_cause_step_id, dependency_chain, message, created_at, started_at, finished_at, updated_at]
+      properties:
+        step_id:
+          $ref: "#/components/schemas/UuidV4"
+        managed_service_id:
+          $ref: "#/components/schemas/UuidV4"
+        agent_id:
+          $ref: "#/components/schemas/UuidV4"
+        local_service_id:
+          $ref: "#/components/schemas/ServiceSlug"
+        status:
+          $ref: "#/components/schemas/StepStatus"
+        topology_level:
+          type: integer
+          minimum: 0
+        dispatch_idempotency_key:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+          description: POST Agent 动作前持久化；崩溃恢复时复用。
+        operation_id:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+        probe_attempts:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ProbeAttempt"
+        warnings:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items:
+            type: string
+            enum: [READINESS_FALLBACK_SCM]
+        root_cause_step_id:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+        dependency_chain:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/UuidV4"
+        message:
+          type: [string, "null"]
+          maxLength: 1024
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RecoveryRun:
+      type: object
+      additionalProperties: false
+      required: [run_id, group_id, trigger, epoch, retry_of_run_id, status, reason, members_snapshot, dependencies_snapshot, probes_snapshot, steps, failure_code, failure_message, created_at, started_at, finished_at, updated_at]
+      properties:
+        run_id:
+          $ref: "#/components/schemas/UuidV4"
+        group_id:
+          $ref: "#/components/schemas/UuidV4"
+        trigger:
+          $ref: "#/components/schemas/RunTrigger"
+        epoch:
+          $ref: "#/components/schemas/Sha256"
+        retry_of_run_id:
+          oneOf:
+            - $ref: "#/components/schemas/UuidV4"
+            - type: "null"
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        reason:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 512
+        members_snapshot:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/RecoveryMember"
+        dependencies_snapshot:
+          type: array
+          maxItems: 16384
+          items:
+            $ref: "#/components/schemas/RecoveryDependency"
+        probes_snapshot:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ReadinessProbe"
+        steps:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/RecoveryStep"
+        failure_code:
+          oneOf:
+            - $ref: "#/components/schemas/ErrorCode"
+            - type: "null"
+        failure_message:
+          type: [string, "null"]
+          maxLength: 1024
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        finished_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    RecoveryRunCollection:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RecoveryRun"
+        next_cursor:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 2048
+    ErrorDetail:
+      oneOf:
+        - type: object
+          additionalProperties: true
+        - type: "null"
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, detail, request_id]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        detail:
+          $ref: "#/components/schemas/ErrorDetail"
+        request_id:
+          $ref: "#/components/schemas/UuidV4"

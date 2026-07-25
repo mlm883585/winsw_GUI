@@ -1,0 +1,7 @@
+-r requirements.txt
+openapi-spec-validator==0.7.2
+PyInstaller==6.16.0
+pytest==8.4.2
+pytest-asyncio==1.2.0
+pytest-cov==7.0.0
+PyYAML==6.0.3

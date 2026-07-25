@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Recovery Groups · WinSW Recovery{% endblock %}
+{% block content %}
+<div class="page-heading"><div><h1>Recovery Groups</h1><p class="muted">严格依赖；缺少任一 required Agent 时不执行部分子图。</p></div></div>
+
+<section class="panel">
+  <h2>新建恢复组</h2>
+  <form id="create-group-form" class="row-form">
+    <label>名称<input name="name" maxlength="128" required></label>
+    <label>说明<input name="description" maxlength="1024"></label>
+    <button type="submit">创建</button>
+  </form>
+</section>
+
+<div class="split-layout">
+  <section class="panel group-list">
+    <h2>恢复组</h2>
+    {% for group in groups %}
+      <a class="group-card {% if selected_group and selected_group.group_id == group.group_id %}selected{% endif %}" href="/groups?group={{ group.group_id }}">
+        <strong>{{ group.name }}</strong><span class="badge {{ group.state|lower }}">{{ group.state }}</span>
+        <small>{{ group.members|length }} services · settle {{ group.node_settle_window_seconds }}s</small>
+      </a>
+    {% else %}<p class="empty">尚未创建恢复组</p>{% endfor %}
+  </section>
+
+  <section class="panel group-editor">
+  {% if selected_group %}
+    <div class="page-heading"><div><h2>{{ selected_group.name }}</h2><p class="mono muted">{{ selected_group.group_id }}</p></div>
+      <div class="actions">
+        <button data-group-command="arm" data-group-id="{{ selected_group.group_id }}">arm</button>
+        <button data-group-command="disarm" data-group-id="{{ selected_group.group_id }}">disarm</button>
+        <button data-group-command="run" data-group-id="{{ selected_group.group_id }}">Run now</button>
+      </div>
+    </div>
+    <dl class="facts">
+      <div><dt>状态</dt><dd>{{ selected_group.state }}</dd></div>
+      <div><dt>Baseline</dt><dd class="mono compact">{{ selected_group.baseline_epoch or "—" }}</dd></div>
+      <div><dt>Candidate</dt><dd class="mono compact">{{ selected_group.candidate_epoch or "—" }}</dd></div>
+      <div><dt>缺失节点</dt><dd>{{ selected_group.missing_agent_ids|join(", ") or "无" }}</dd></div>
+    </dl>
+    <h3>基本信息</h3>
+    <form id="edit-group-form" data-group-id="{{ selected_group.group_id }}" class="row-form">
+      <label>名称<input name="name" value="{{ selected_group.name }}" maxlength="128" required></label>
+      <label>说明<input name="description" value="{{ selected_group.description }}" maxlength="1024"></label>
+      <button type="submit">保存信息</button>
+    </form>
+    {% if selected_group.state == "BLOCKED_PRECONDITION" %}
+    <section class="precondition-alert" aria-labelledby="blocked-reasons-title">
+      <h3 id="blocked-reasons-title">自动恢复已隔离</h3>
+      <p>必须先 disarm、修复以下前置条件，再重新 arm；外部条件恢复不会自动解除隔离。</p>
+      <ul>
+      {% for reason in selected_group.blocked_reasons %}
+        <li>
+          <code>{{ reason.code }}</code> — {{ reason.message }}
+          {% if reason.agent_id %}<span class="mono compact">Agent {{ reason.agent_id }}</span>{% endif %}
+          {% if reason.managed_service_id %}<span class="mono compact">Service {{ reason.managed_service_id }}</span>{% endif %}
+          {% if reason.managed_service_ids %}<span class="mono compact">Services {{ reason.managed_service_ids|join(", ") }}</span>{% endif %}
+        </li>
+      {% else %}
+        <li class="error-text">隔离原因记录缺失；禁止重新执行，先 disarm 后重新验证。</li>
+      {% endfor %}
+      </ul>
+    </section>
+    {% endif %}
+
+    <h3>1. 成员</h3>
+    <form id="members-form" data-group-id="{{ selected_group.group_id }}" class="check-list">
+      {% for service in services %}
+      <label><input type="checkbox" name="member" value="{{ service.managed_service_id }}" {% if service.managed_service_id in selected_member_ids %}checked{% endif %}>
+        {{ service.display_name }} <span class="muted">({{ service.local_service_id }} @ {{ service.agent_id }})</span></label>
+      {% endfor %}
+      <button type="submit">保存成员</button>
+    </form>
+
+    <h3>2. 严格依赖</h3>
+    <p class="muted">语义：下游依赖上游。保存时立即验环。</p>
+    <form id="dependencies-form" data-group-id="{{ selected_group.group_id }}">
+      <textarea name="dependencies" rows="8" spellcheck="false">{{ dependencies_json }}</textarea>
+      <button type="submit">保存依赖 JSON</button>
+    </form>
+
+    <h3>3. Readiness</h3>
+    <p class="muted">每个服务最多一个；未设置时回退 SCM 并记录警告。</p>
+    {% if selected_group.members %}
+    <script id="probe-definitions" type="application/json">{{ selected_group.probes|tojson }}</script>
+    <form id="probe-form" data-group-id="{{ selected_group.group_id }}" class="stack-form">
+      <label>服务<select id="probe-service" name="managed_service_id">{% for member in selected_group.members %}<option value="{{ member.managed_service_id }}">{{ member.display_name }}</option>{% endfor %}</select></label>
+      <label>探针定义 JSON<textarea id="probe-definition" name="definition" rows="8" spellcheck="false">{
+  "kind": "scm",
+  "timeout_seconds": 2,
+  "interval_seconds": 3,
+  "deadline_seconds": 60
+}</textarea></label>
+      <p id="probe-mode" class="muted" aria-live="polite">未保存显式探针；运行时使用 SCM fallback。</p>
+      <div class="actions">
+        <button type="submit">保存探针</button>
+        <button type="button" id="delete-probe-button" disabled>删除已保存探针 / 恢复 SCM fallback</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="empty">请先保存至少一个成员，再配置 readiness。</p>
+    {% endif %}
+  {% else %}<p class="empty">选择一个恢复组进行配置</p>{% endif %}
+  </section>
+</div>
+{% endblock %}
