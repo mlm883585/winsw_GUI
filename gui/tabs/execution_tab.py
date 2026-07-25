@@ -60,5 +60,5 @@ class ExecutionTab(ttk.Frame):
         return {
             'executable': self.executable_var.get(),
             'workingdirectory': self.workdir_var.get(),
-            'arguments': self.args_text.get("1.0", tk.END).strip()
+            'arguments': self.args_text.get("1.0", "end-1c")
         }

@@ -12,6 +12,8 @@ class AccountTab(ttk.Frame):
 
     def __init__(self, parent):
         super().__init__(parent)
+        self._loaded_username = "LocalSystem"
+        self._loaded_account_type = "Local System"
         self.create_widgets()
 
     def create_widgets(self):
@@ -86,6 +88,9 @@ class AccountTab(ttk.Frame):
         self.password_var.set(service_account.get('password', ''))
         self.allow_logon_var.set(service_account.get('allowservicelogon', False))
 
+        self._loaded_username = username
+        self._loaded_account_type = account_type
+
         self.toggle_custom_user_frame()
 
     def get_data(self) -> dict:
@@ -93,7 +98,24 @@ class AccountTab(ttk.Frame):
         if account_type == "Custom":
             username = self.username_var.get()
             if not username:
-                return {}  # 如果自定义但没填用户名，则不生成该节
+                if (
+                    self._loaded_account_type == "Custom"
+                    and not self._loaded_username
+                ):
+                    return {
+                        'serviceaccount': {
+                            'username': '',
+                            'password': self.password_var.get(),
+                            'allowservicelogon': self.allow_logon_var.get()
+                        }
+                    }
+                return {
+                    'serviceaccount': {
+                        'username': '',
+                        'password': '',
+                        'allowservicelogon': False
+                    }
+                }
             return {
                 'serviceaccount': {
                     'username': username,
@@ -103,8 +125,15 @@ class AccountTab(ttk.Frame):
             }
         else:
             internal_name = self.BUILTIN_ACCOUNTS[account_type]
+            if (
+                account_type == self._loaded_account_type
+                and self._loaded_username.lower() == internal_name.lower()
+            ):
+                internal_name = self._loaded_username
             return {
                 'serviceaccount': {
-                    'username': internal_name
+                    'username': internal_name,
+                    'password': self.password_var.get(),
+                    'allowservicelogon': self.allow_logon_var.get()
                 }
             }
